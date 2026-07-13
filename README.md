@@ -20,6 +20,8 @@
 - `gimbal_cmd`：CMD 发布的云台控制命令。
 - `gimbal_euler`：云台 IMU 融合后的欧拉角。
 - `gimbal_gyro`：云台 IMU 原始角速度。
+- `chassis_gyro_z`：双板底盘侧发布的 Z 轴角速度，供小陀螺模式前馈使用。
+- `dualboard_chassis_mode`：双板底盘模式；仅 ROTOR 模式激活底盘角速度前馈。
 
 
 标准命令流程：
@@ -80,6 +82,7 @@ constructor_args:
   - patrol_omega: 0.0
   - roll_reverse_flag: false
   - thread_priority: LibXR::Thread::Priority::MEDIUM
+  - rotor_ff_enabled: false
 template_args:
 []
 
@@ -88,9 +91,10 @@ Required Hardware:
 []
 
 Depends:
-  - qdu-future/CMD
-  - qdu-future/Motor
-  - qdu-future/BMI088
+  - pldx/CMD
+  - pldx/Motor
+  - pldx/BMI088
+  - pldx/Referee
 
 ## 6. 代码入口
 Modules/Gimbal/Gimbal.hpp

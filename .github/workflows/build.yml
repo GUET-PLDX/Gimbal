@@ -6,6 +6,9 @@ on:
   schedule:
     - cron: '0 3 1 * *'  # 每月1日凌晨3点（UTC）自动触发
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -56,46 +59,46 @@ jobs:
       - name: Checkout Motor module
         uses: actions/checkout@v4
         with:
-          repository: QDU-Robomaster/Motor
+          repository: GUET-PLDX/Motor
           path: Modules/Motor
 
       - name: Checkout RMMotor module
         uses: actions/checkout@v4
         with:
-          repository: QDU-Robomaster/RMMotor
-          ref: master
+          repository: GUET-PLDX/RMMotor
+          ref: main
           path: Modules/RMMotor
 
       - name: Checkout DMMotor module
         uses: actions/checkout@v4
         with:
-          repository: QDU-Robomaster/DMMotor
+          repository: GUET-PLDX/DMMotor
           path: Modules/DMMotor
 
       - name: Checkout CMD module
         uses: actions/checkout@v4
         with:
-          repository: QDU-Robomaster/CMD
+          repository: GUET-PLDX/CMD
           path: Modules/CMD
 
       - name: Checkout BMI088 module
         uses: actions/checkout@v4
         with:
-          repository: xrobot-org/BMI088
-          ref: master
+          repository: GUET-PLDX/BMI088
+          ref: main
           path: Modules/BMI088
 
       - name: Checkout MadgwickAHRS module
         uses: actions/checkout@v4
         with:
-          repository: xrobot-org/MadgwickAHRS
-          ref: master
+          repository: GUET-PLDX/MadgwickAHRS
+          ref: main
           path: Modules/MadgwickAHRS
 
       - name: Checkout Referee module
         uses: actions/checkout@v4
         with:
-          repository: QDU-Robomaster/Referee
+          repository: GUET-PLDX/Referee
           path: Modules/Referee
 
       - name: Setup Python & Install deps
