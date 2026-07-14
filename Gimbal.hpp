@@ -96,6 +96,7 @@ depends:
 === END MANIFEST === */
 // clang-format on
 
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -128,6 +129,10 @@ enum class GimbalEvent : uint8_t {
   SET_MODE_AUTOPATROL,
   SET_MODE_LOW_SENSITIVITY
 };
+static constexpr uint32_t MODE_REQUEST_NONE = 0U;
+static constexpr uint32_t MODE_REQUEST_RELAX_BIT = 1U << 31U;
+static_assert(std::atomic<uint32_t>::is_always_lock_free,
+              "Gimbal mode requests require a lock-free 32-bit atomic");
 
 class Gimbal : public LibXR::Application {
  public:
@@ -217,7 +222,7 @@ class Gimbal : public LibXR::Application {
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
           UNUSED(event_id);
-          gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
+          gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);
         },
         this);
 
@@ -225,14 +230,14 @@ class Gimbal : public LibXR::Application {
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
           UNUSED(event_id);
-          gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
+          gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);
         },
         this);
 
     auto callback = LibXR::Callback<uint32_t>::Create(
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
-          gimbal->SetMode(static_cast<GimbalEvent>(event_id));
+          gimbal->RequestMode(static_cast<GimbalEvent>(event_id));
         },
         this);
 
@@ -272,6 +277,7 @@ class Gimbal : public LibXR::Application {
     gimbal->last_online_time_ = LibXR::Timebase::GetMicroseconds();
 
     while (true) {
+      gimbal->ConsumePendingModeRequest();
       if (cmd_suber.Available()) {
         gimbal->cmd_data_ = cmd_suber.GetData();
         gimbal->cmd_sample_seq_++;
@@ -441,6 +447,10 @@ class Gimbal : public LibXR::Application {
    * @brief 云台控制计算与输出
    */
   void Control() {
+    if (ConsumePendingModeRequest()) {
+      return;
+    }
+
     if (!motor_feedback_online_ || !imu_online_) {
       // 反馈离线时立即切松弛，避免继续使用旧反馈闭环输出。
       SetMode(GimbalEvent::SET_MODE_RELAX);
@@ -501,7 +511,13 @@ class Gimbal : public LibXR::Application {
       }
     };
 
+    if (ConsumePendingRelaxRequest()) {
+      return;
+    }
     motor_control(motor_pit_, motor_pit_feedback_, pit_motor_cmd);
+    if (ConsumePendingRelaxRequest()) {
+      return;
+    }
     ControlYawMotor(yaw_motor_cmd, valid_lqr_command);
   }
 
@@ -589,6 +605,7 @@ class Gimbal : public LibXR::Application {
   const char* gyro_topic_name_;
   LibXR::Topic::TopicHandle chassis_gyro_z_topic_;
   LibXR::Topic::TopicHandle dualboard_chassis_mode_topic_;
+  std::atomic<uint32_t> pending_mode_request_{MODE_REQUEST_NONE};
   LibXR::Thread thread_;
 
   /*----------工具函数--------------------------------*/
@@ -638,6 +655,60 @@ class Gimbal : public LibXR::Application {
     yaw_route_state_.RequestRearm();
   }
 
+  static uint32_t EncodeModeRequest(GimbalEvent gimbal_event) {
+    return static_cast<uint32_t>(gimbal_event) + 1U;
+  }
+
+  void RequestMode(GimbalEvent gimbal_event) {
+    if (gimbal_event == GimbalEvent::SET_MODE_RELAX) {
+      pending_mode_request_.fetch_or(MODE_REQUEST_RELAX_BIT,
+                                     std::memory_order_release);
+      return;
+    }
+
+    const uint32_t REQUEST = EncodeModeRequest(gimbal_event);
+    uint32_t pending = pending_mode_request_.load(std::memory_order_relaxed);
+    while (true) {
+      if ((pending & MODE_REQUEST_RELAX_BIT) != 0U) {
+        return;
+      }
+      if (pending_mode_request_.compare_exchange_weak(
+              pending, REQUEST, std::memory_order_release,
+              std::memory_order_relaxed)) {
+        return;
+      }
+    }
+  }
+
+  bool ConsumePendingModeRequest() {
+    const uint32_t REQUEST = pending_mode_request_.exchange(
+        MODE_REQUEST_NONE, std::memory_order_acquire);
+    if (REQUEST == MODE_REQUEST_NONE) {
+      return false;
+    }
+    if ((REQUEST & MODE_REQUEST_RELAX_BIT) != 0U) {
+      SetMode(GimbalEvent::SET_MODE_RELAX);
+    } else {
+      SetMode(static_cast<GimbalEvent>(REQUEST - 1U));
+    }
+    return true;
+  }
+
+  bool ConsumePendingRelaxRequest() {
+    uint32_t pending = pending_mode_request_.load(std::memory_order_acquire);
+    while (true) {
+      if ((pending & MODE_REQUEST_RELAX_BIT) == 0U) {
+        return false;
+      }
+      if (pending_mode_request_.compare_exchange_weak(
+              pending, MODE_REQUEST_NONE, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        SetMode(GimbalEvent::SET_MODE_RELAX);
+        return true;
+      }
+    }
+  }
+
   void ControlYawMotor(const Motor::MotorCmd& command, bool valid_lqr_command) {
     if (motor_yaw_feedback_.state == 0) {
       motor_yaw_->Enable();
@@ -646,6 +717,9 @@ class Gimbal : public LibXR::Application {
       motor_yaw_->ClearError();
       InvalidateSubmittedYawTorque();
     } else {
+      if (ConsumePendingRelaxRequest()) {
+        return;
+      }
       motor_yaw_->Control(command);
       last_submitted_yaw_torque_nm_ = command.torque;
       last_submitted_yaw_torque_valid_ = true;

@@ -5,6 +5,8 @@ HEADER="${1:-Gimbal.hpp}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 bash "${SCRIPT_DIR}/gimbal_core_static_regression.sh" "${HEADER}"
+python3 "${SCRIPT_DIR}/mode_request_serialization_regression.py" \
+  --header "${HEADER}"
 
 need() {
   rg -q -- "$1" "${HEADER}" || { echo "missing: $2" >&2; exit 1; }
@@ -538,6 +540,10 @@ ordered_unique(
     submit_else_start,
     submit_else_end,
     [
+        (
+            r"\bConsumePendingRelaxRequest\s*\(\s*\)",
+            "pending RELAX guard",
+        ),
         (r"\bmotor_yaw_->Control\s*\(\s*command\s*\)\s*;", "Control"),
         (
             r"\blast_submitted_yaw_torque_nm_\s*=\s*command\.torque\s*;",
@@ -561,18 +567,35 @@ forbid_in_span(
     "non-Control action in final Yaw submit else",
 )
 
-valid_lqr_ifs = top_level_matches(
+submit_ifs = top_level_matches(
     submit_else_start, submit_else_end, r"\bif\s*\("
 )
+parsed_submit_ifs = [
+    (match.start(), *parse_if(match.start(), "final Yaw submit if"))
+    for match in submit_ifs
+]
+pending_relax_ifs = [
+    item for item in parsed_submit_ifs if item[1] == "ConsumePendingRelaxRequest()"
+]
+if len(pending_relax_ifs) != 1:
+    raise SystemExit(
+        f"wrong count ({len(pending_relax_ifs)} != 1): final pending RELAX guard"
+    )
+pending_if_start, _, pending_block_start, pending_block_end, pending_if_after = (
+    pending_relax_ifs[0]
+)
+if normalized(code[pending_block_start:pending_block_end]) != "return;":
+    raise SystemExit("final pending RELAX guard must return before Yaw submit")
+valid_lqr_ifs = [
+    item for item in parsed_submit_ifs if item[1] == "valid_lqr_command"
+]
 if len(valid_lqr_ifs) != 1:
     raise SystemExit(
         f"wrong count ({len(valid_lqr_ifs)} != 1): valid LQR confirmation if"
     )
-valid_condition, valid_if_start, valid_if_end, valid_if_after = parse_if(
-    valid_lqr_ifs[0].start(), "valid LQR confirmation"
+valid_if_position, _, valid_if_start, valid_if_end, valid_if_after = (
+    valid_lqr_ifs[0]
 )
-if valid_condition != "valid_lqr_command":
-    raise SystemExit("wrong condition: valid LQR confirmation")
 if skip_whitespace(valid_if_after, submit_else_end) != submit_else_end:
     raise SystemExit("trailing statements after valid LQR confirmation")
 ordered_unique(
@@ -592,13 +615,17 @@ if len(yaw_control_sites) != 1 or not (
     submit_else_start <= yaw_control_sites[0].start() < submit_else_end
 ):
     raise SystemExit("motor_yaw_->Control must appear exactly once in final submit else")
+if not (
+    pending_if_start < pending_if_after <= yaw_control_sites[0].start()
+):
+    raise SystemExit("final pending RELAX guard must dominate Yaw Control")
 commit_sites = matches_in(
     0, len(code), r"yaw_lqr_eso_\.CommitAppliedTorque\s*\("
 )
 if len(commit_sites) != 1 or not (
     yaw_control_sites[0].start()
     < commit_sites[0].start()
-    < valid_lqr_ifs[0].start()
+    < valid_if_position
 ):
     raise SystemExit("CommitAppliedTorque must follow Control inside final submit else")
 confirm_sites = matches_in(0, len(code), r"yaw_route_state_\.ConfirmLqrCommit\s*\(")
@@ -612,6 +639,20 @@ parsed_control_ifs = [
     (match.start(), *parse_if(match.start(), "Control top-level if"))
     for match in control_ifs
 ]
+mode_request_ifs = [
+    item for item in parsed_control_ifs if item[1] == "ConsumePendingModeRequest()"
+]
+if len(mode_request_ifs) != 1:
+    raise SystemExit(
+        f"wrong count ({len(mode_request_ifs)} != 1): Control mode request guard"
+    )
+mode_request_if_start, _, mode_request_block_start, mode_request_block_end, _ = (
+    mode_request_ifs[0]
+)
+if normalized(code[mode_request_block_start:mode_request_block_end]) != "return;":
+    raise SystemExit("Control mode request guard must return before solve")
+if normalized(code[control_start:mode_request_if_start]):
+    raise SystemExit("Control mode request guard must be the first action")
 relax_ifs = [
     item
     for item in parsed_control_ifs
@@ -656,12 +697,36 @@ if len(submit_calls) != 1:
         f"wrong count ({len(submit_calls)} != 1): ControlYawMotor submit call"
     )
 submit_call = submit_calls[0]
+pitch_calls = top_level_matches(
+    control_start,
+    control_end,
+    r"\bmotor_control\s*\(\s*motor_pit_\s*,",
+)
+if len(pitch_calls) != 1:
+    raise SystemExit(
+        f"wrong count ({len(pitch_calls)} != 1): Pitch motor submit call"
+    )
+pending_relax_control_ifs = [
+    item for item in parsed_control_ifs if item[1] == "ConsumePendingRelaxRequest()"
+]
+if len(pending_relax_control_ifs) != 2:
+    raise SystemExit(
+        f"wrong count ({len(pending_relax_control_ifs)} != 2): "
+        "Control pending RELAX guards"
+    )
+for item in pending_relax_control_ifs:
+    if normalized(code[item[2]:item[3]]) != "return;":
+        raise SystemExit("Control pending RELAX guard must return")
+first_pending, second_pending = pending_relax_control_ifs
 if not (
-    relax_if_start < relax_after <= finite_if_start < finite_after <= submit_call.start()
+    mode_request_if_start < relax_if_start < relax_after <= finite_if_start
+    < finite_after <= first_pending[0] < first_pending[4]
+    <= pitch_calls[0].start() < second_pending[0] < second_pending[4]
+    <= submit_call.start()
 ):
-    raise SystemExit("finite Yaw guard must dominate the top-level submit path")
-if top_level_matches(finite_after, submit_call.start(), r"\breturn\b"):
-    raise SystemExit("top-level return bypasses Yaw submission after finite guard")
+    raise SystemExit(
+        "mode, finite, Pitch, pending RELAX, and Yaw guards are misordered"
+    )
 
 set_mode_ifs = top_level_matches(set_mode_start, set_mode_end, r"\bif\s*\(")
 parsed_set_mode_ifs = [
