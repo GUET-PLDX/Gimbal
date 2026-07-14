@@ -467,6 +467,26 @@ static void test_invalid_inputs_are_rejected() {
       0.0005f);
   CHECK(!output.valid);
 
+  output = controller.Calculate(
+      cfg, {.theta_rad = 0.0f, .omega_rad_s = 0.0f, .alpha_rad_s2 = 0.0f},
+      {.theta_rad = 0.0f,
+       .omega_rad_s = 0.0f,
+       .tau_meas_nm = 0.0f,
+       .valid = true,
+       .torque_measurement_valid = true},
+      0.020f);
+  CHECK(output.valid);
+
+  output = controller.Calculate(
+      cfg, {.theta_rad = 0.0f, .omega_rad_s = 0.0f, .alpha_rad_s2 = 0.0f},
+      {.theta_rad = 0.0f,
+       .omega_rad_s = 0.0f,
+       .tau_meas_nm = 0.0f,
+       .valid = true,
+       .torque_measurement_valid = true},
+      0.020001f);
+  CHECK(!output.valid);
+
   output = calculate_once(controller, cfg, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f);
   CHECK_NEAR(output.tau_cmd_nm, 1.7f, 1.0e-6f);
 }

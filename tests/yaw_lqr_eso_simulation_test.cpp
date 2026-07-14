@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "yaw_lqr_eso_test_support.hpp"
@@ -43,6 +44,7 @@ struct DtMode {
 
 struct SimulationResult {
   std::string_view scenario;
+  bool feasible_sine{};
   std::string_view dt_mode;
   double plant_j{};
   double plant_b{};
@@ -538,6 +540,7 @@ static SimulationResult run_simulation_case(const Scenario& scenario,
 
   SimulationResult result{
       .scenario = scenario.name,
+      .feasible_sine = scenario.feasible_sine,
       .dt_mode = dt_mode.name,
       .plant_j = plant_j,
       .plant_b = plant_b,
@@ -696,14 +699,6 @@ static std::vector<SimulationResult> run_mismatch_matrix() {
   return results;
 }
 
-static std::vector<SimulationResult> run_comparison_matrix() {
-  std::vector<SimulationResult> results = run_nominal_matrix();
-  const std::vector<SimulationResult> MISMATCH_RESULTS = run_mismatch_matrix();
-  results.insert(results.end(), MISMATCH_RESULTS.begin(),
-                 MISMATCH_RESULTS.end());
-  return results;
-}
-
 static std::string_view controller_name(ControllerKind kind) {
   switch (kind) {
     case ControllerKind::LEGACY:
@@ -751,12 +746,6 @@ static bool is_step_scenario(std::string_view name) {
   return name == "step_pos_5deg" || name == "step_neg_5deg";
 }
 
-static bool is_feasible_sine(std::string_view name) {
-  return name == "sine_1hz_10deg" || name == "sine_3hz_5deg" ||
-         name == "sine_3hz_8deg" || name == "sine_5hz_2deg" ||
-         name == "sine_5hz_3deg";
-}
-
 static void test_non_performance_gates(
     const std::vector<SimulationResult>& results) {
   constexpr double ERROR_LIMIT = deg_to_rad(1.0);
@@ -792,7 +781,7 @@ static void test_non_performance_gates(
                      RESULT.step_prior_rmse + RMSE_COMPARISON_TOLERANCE,
                  RESULT, "step_nonincreasing_rmse");
     }
-    if (is_feasible_sine(RESULT.scenario)) {
+    if (RESULT.feasible_sine) {
       CHECK_GATE(RESULT.soft_hard_union_ratio < 0.5, RESULT,
                  "feasible_sine_limit_ratio");
     }
@@ -854,14 +843,13 @@ static void test_exact_matrix_counts_and_smoke_cases() {
     CHECK(RESULT.finite);
   }
 
-  const std::vector<SimulationResult> NOMINAL_RESULTS = run_nominal_matrix();
+  std::vector<SimulationResult> nominal_results = run_nominal_matrix();
   const std::vector<SimulationResult> MISMATCH_RESULTS = run_mismatch_matrix();
-  const std::vector<SimulationResult> RESULTS = run_comparison_matrix();
   CHECK(SCENARIOS.size() == 10U);
   CHECK(NOMINAL_ROWS == 80U);
   CHECK(GRID_ROWS == 576U);
-  CHECK(NOMINAL_RESULTS.size() == NOMINAL_ROWS);
-  for (const SimulationResult& RESULT : NOMINAL_RESULTS) {
+  CHECK(nominal_results.size() == NOMINAL_ROWS);
+  for (const SimulationResult& RESULT : nominal_results) {
     CHECK(RESULT.finite);
     CHECK(RESULT.constraints_respected);
   }
@@ -870,9 +858,13 @@ static void test_exact_matrix_counts_and_smoke_cases() {
     CHECK(RESULT.finite);
     CHECK(RESULT.constraints_respected);
   }
-  CHECK(RESULTS.size() == NOMINAL_ROWS + GRID_ROWS);
-  test_non_performance_gates(RESULTS);
-  CHECK(write_csv(RESULTS));
+  std::vector<SimulationResult> results = std::move(nominal_results);
+  results.reserve(NOMINAL_ROWS + GRID_ROWS);
+  results.insert(results.end(), MISMATCH_RESULTS.begin(),
+                 MISMATCH_RESULTS.end());
+  CHECK(results.size() == NOMINAL_ROWS + GRID_ROWS);
+  test_non_performance_gates(results);
+  CHECK(write_csv(results));
 }
 
 int main() {
