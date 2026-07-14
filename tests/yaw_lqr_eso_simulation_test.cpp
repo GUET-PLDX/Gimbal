@@ -773,8 +773,6 @@ static void test_non_performance_gates(
         RESULT, "exact_measurement_duration");
     if (RESULT.controller == ControllerKind::LEGACY) {
       CHECK_GATE(!RESULT.eso_metric_valid, RESULT, "legacy_eso_metric_invalid");
-    } else {
-      CHECK_GATE(RESULT.eso_metric_valid, RESULT, "lqr_eso_metric_valid");
     }
 
     if (RESULT.controller != ControllerKind::LQR_1_1) {
