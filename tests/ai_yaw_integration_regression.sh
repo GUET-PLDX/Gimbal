@@ -154,6 +154,173 @@ if missing:
 PY
 }
 
+check_yaw_solve_and_submit_ledger() {
+  python3 - "${HEADER}" <<'PY'
+import pathlib
+import re
+import sys
+
+
+source = pathlib.Path(sys.argv[1]).read_text()
+non_code = re.compile(
+    r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', re.S
+)
+
+
+def mask(match):
+    return "".join("\n" if char == "\n" else " " for char in match.group())
+
+
+code = non_code.sub(mask, source)
+
+
+def matching_brace(open_brace, description):
+    depth = 0
+    for index in range(open_brace, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    raise SystemExit(f"unbalanced: {description}")
+
+
+def method_body(signature, description):
+    matches = list(re.finditer(signature + r"\s*\{", code))
+    if len(matches) != 1:
+        raise SystemExit(
+            f"wrong count ({len(matches)} != 1): {description} definition"
+        )
+    open_brace = matches[0].end() - 1
+    close_brace = matching_brace(open_brace, description)
+    return open_brace + 1, close_brace, code[open_brace + 1 : close_brace]
+
+
+def require(block, pattern, description):
+    if re.search(pattern, block, re.S) is None:
+        raise SystemExit(f"missing: {description}")
+
+
+def forbid(block, pattern, description):
+    if re.search(pattern, block, re.S) is not None:
+        raise SystemExit(f"forbidden: {description}")
+
+
+solve_start, solve_end, solve = method_body(r"\b(?:bool|void)\s+Solve\s*\(\s*\)", "Solve")
+legacy_start, legacy_end, legacy = method_body(
+    r"\bvoid\s+SolveLegacyYaw\s*\(\s*\)", "SolveLegacyYaw"
+)
+ai_start, ai_end, ai = method_body(r"\bbool\s+SolveAiYaw\s*\(\s*\)", "SolveAiYaw")
+control_start, control_end, control = method_body(
+    r"\bvoid\s+Control\s*\(\s*\)", "Control"
+)
+invalidate_start, invalidate_end, invalidate = method_body(
+    r"\bvoid\s+InvalidateSubmittedYawTorque\s*\(\s*\)",
+    "InvalidateSubmittedYawTorque",
+)
+submit_start, submit_end, submit = method_body(
+    r"\bvoid\s+ControlYawMotor\s*\(\s*const\s+Motor::MotorCmd&\s+command\s*,\s*bool\s+valid_lqr_command\s*\)",
+    "ControlYawMotor",
+)
+_, _, set_mode = method_body(
+    r"\bvoid\s+SetMode\s*\(\s*GimbalEvent\s+gimbal_event\s*\)", "SetMode"
+)
+
+require(
+    solve,
+    r"const\s+float\s+PIT_ERROR\b.*switch\s*\(\s*yaw_route_decision_\.action\s*\)",
+    "Pitch solve before Yaw route dispatch",
+)
+require(
+    solve,
+    r"case\s+YawRouteState::Action::LEGACY_RUN\s*:.*SolveLegacyYaw\s*\(\s*\s*\).*"
+    r"case\s+YawRouteState::Action::HOLD_CURRENT\s*:.*SolveLegacyYaw\s*\(\s*\s*\).*"
+    r"case\s+YawRouteState::Action::LQR_RUN\s*:.*SolveAiYaw\s*\(\s*\s*\).*"
+    r"case\s+YawRouteState::Action::ZERO_OUTPUT\s*:.*yaw_output_\s*=\s*0\.0f\s*;.*"
+    r"case\s+YawRouteState::Action::RELAX\s*:",
+    "complete Yaw solve dispatch",
+)
+require(
+    legacy,
+    r"const\s+float\s+YAW_ERROR\s*=\s*target_yaw_cmd_\s*-\s*euler_\.Yaw\(\)\s*;.*"
+    r"const\s+float\s+YAW_ANGLE_LOOP_OMEGA\s*=\s*pid_yaw_angle_\.Calculate\(YAW_ERROR,\s*0\.0f,\s*dt_\)\s*;.*"
+    r"const\s+float\s+TARGET_YAW_OMEGA\s*=\s*YAW_ANGLE_LOOP_OMEGA\s*\+\s*target_yaw_dot_\s*;.*"
+    r"const\s+float\s+YAW_ALPHA\s*=\s*\(YAW_ANGLE_LOOP_OMEGA\s*-\s*last_yaw_angle_loop_omega_\)\s*/\s*dt_\s*\+\s*target_yaw_ddot_\s*;.*"
+    r"const\s+float\s+YAW_FEEDFORWARD\s*=\s*j_yaw_\s*\*\s*YAW_ALPHA\s*\+\s*yaw_k_\s*\*\s*YAW_MOTOR_OMEGA_REF\s*;.*"
+    r"pid_yaw_omega_\.SetFeedForward\(YAW_FEEDFORWARD\)\s*;.*"
+    r"yaw_output_\s*=\s*pid_yaw_omega_\.Calculate\(TARGET_YAW_OMEGA,\s*gyro_data_\.z\(\),\s*dt_\)\s*;.*"
+    r"last_yaw_angle_loop_omega_\s*=\s*YAW_ANGLE_LOOP_OMEGA\s*;",
+    "unchanged legacy Yaw formula inside SolveLegacyYaw",
+)
+forbid(legacy, r"yaw_lqr_eso_\.Calculate\s*\(", "LQR calculation in legacy solve")
+require(
+    ai,
+    r"if\s*\(\s*yaw_route_decision_\.rearm_pending\s*\)\s*\{.*"
+    r"last_submitted_yaw_torque_valid_\s*\?\s*last_submitted_yaw_torque_nm_\s*:\s*0\.0f\s*;.*"
+    r"yaw_lqr_eso_\.Reset\(euler_\.Yaw\(\),\s*gyro_data_\.z\(\),\s*PREVIOUS_TORQUE\)\s*;.*"
+    r"yaw_lqr_eso_output_\s*=\s*yaw_lqr_eso_\.Calculate\s*\(.*"
+    r"if\s*\(\s*!yaw_lqr_eso_output_\.valid\s*\|\|\s*"
+    r"!std::isfinite\(yaw_lqr_eso_output_\.tau_cmd_nm\)\s*\)\s*\{.*"
+    r"ResetLegacyYawToCurrent\s*\(\s*\)\s*;.*"
+    r"yaw_route_state_\.RequestRearm\s*\(\s*\)\s*;.*"
+    r"SolveLegacyYaw\s*\(\s*\)\s*;.*return\s+false\s*;.*"
+    r"yaw_output_\s*=\s*yaw_lqr_eso_output_\.tau_cmd_nm\s*;.*return\s+true\s*;",
+    "LQR reset, solve, and finite legacy fallback",
+)
+
+calculate_sites = list(re.finditer(r"yaw_lqr_eso_\.Calculate\s*\(", code))
+if len(calculate_sites) != 1 or not ai_start <= calculate_sites[0].start() < ai_end:
+    raise SystemExit("Yaw LQR Calculate must appear exactly once inside SolveAiYaw")
+
+require(
+    invalidate,
+    r"last_submitted_yaw_torque_nm_\s*=\s*0\.0f\s*;.*"
+    r"last_submitted_yaw_torque_valid_\s*=\s*false\s*;.*"
+    r"yaw_route_state_\.RequestRearm\s*\(\s*\)\s*;",
+    "ledger clear plus route rearm",
+)
+require(
+    submit,
+    r"if\s*\(\s*motor_yaw_feedback_\.state\s*==\s*0\s*\)\s*\{.*"
+    r"motor_yaw_->Enable\s*\(\s*\)\s*;.*InvalidateSubmittedYawTorque\s*\(\s*\)\s*;.*"
+    r"else\s+if\s*\(\s*motor_yaw_feedback_\.state\s*!=\s*1\s*\)\s*\{.*"
+    r"motor_yaw_->ClearError\s*\(\s*\)\s*;.*InvalidateSubmittedYawTorque\s*\(\s*\)\s*;.*"
+    r"else\s*\{.*motor_yaw_->Control\s*\(\s*command\s*\)\s*;.*"
+    r"last_submitted_yaw_torque_nm_\s*=\s*command\.torque\s*;.*"
+    r"last_submitted_yaw_torque_valid_\s*=\s*true\s*;.*"
+    r"yaw_lqr_eso_\.CommitAppliedTorque\s*\(\s*command\.torque\s*\)\s*;.*"
+    r"if\s*\(\s*valid_lqr_command\s*\)\s*\{?\s*"
+    r"yaw_route_state_\.ConfirmLqrCommit\s*\(\s*\)\s*;",
+    "actual Yaw submission ledger and conditional LQR confirmation",
+)
+
+yaw_control_sites = list(re.finditer(r"motor_yaw_->Control\s*\(", code))
+if len(yaw_control_sites) != 1 or not submit_start <= yaw_control_sites[0].start() < submit_end:
+    raise SystemExit("motor_yaw_->Control must appear exactly once inside ControlYawMotor")
+commit_sites = list(re.finditer(r"yaw_lqr_eso_\.CommitAppliedTorque\s*\(", code))
+if len(commit_sites) != 1 or not yaw_control_sites[0].start() < commit_sites[0].start() < submit_end:
+    raise SystemExit("CommitAppliedTorque must follow the actual Yaw Control site")
+
+finite_guard = re.search(r"if\s*\(\s*!std::isfinite\(yaw_output_\)\s*\)", control)
+submit_call = re.search(r"ControlYawMotor\s*\(", control)
+if finite_guard is None or submit_call is None or finite_guard.start() >= submit_call.start():
+    raise SystemExit("finite Yaw guard must precede ControlYawMotor in Control")
+require(
+    control,
+    r"motor_yaw_->Relax\s*\(\s*\)\s*;\s*InvalidateSubmittedYawTorque\s*\(\s*\)\s*;",
+    "RELAX clears the submitted Yaw ledger",
+)
+require(
+    set_mode,
+    r"SET_MODE_COMMON.*SET_MODE_LOW_SENSITIVITY.*current_mode_\s*=\s*gimbal_event\s*;\s*return\s*;.*"
+    r"switch\s*\(\s*gimbal_event\s*\).*motor_yaw_->Disable\s*\(\s*\)\s*;.*"
+    r"InvalidateSubmittedYawTorque\s*\(\s*\)\s*;",
+    "nontrivial mode transitions clear ledger after any Disable",
+)
+PY
+}
+
 need '#include "YawLqrEso.hpp"' 'algorithm include'
 need_multiline \
   'rotor_ff_enabled: false\s*- ai_yaw_lqr_eso_enable: false\s*- yaw_lqr_eso:' \
@@ -169,6 +336,12 @@ need 'YawLqrEso::Config yaw_lqr_eso_config_snapshot_\{\}' \
   'same-cycle AI Yaw config snapshot member'
 need 'YawRouteState yaw_route_state_\{\}' 'route state member'
 need 'YawRouteState::Decision yaw_route_decision_\{\}' 'route decision member'
+need 'YawLqrEso yaw_lqr_eso_\{\}' 'Yaw LQR/ESO controller member'
+need 'YawLqrEso::Output yaw_lqr_eso_output_\{\}' 'Yaw LQR/ESO output member'
+need 'float last_submitted_yaw_torque_nm_ = 0\.0f' \
+  'actual submitted Yaw torque ledger member'
+need 'bool last_submitted_yaw_torque_valid_ = false' \
+  'actual submitted Yaw torque validity member'
 need 'CMD::Mode ctrl_mode_snapshot_ = CMD::Mode::CMD_OP_CTRL' \
   'same-cycle control mode snapshot member'
 need 'bool ai_gimbal_status_snapshot_ = false' \
@@ -218,7 +391,8 @@ forbid_in_lines 'bool IsRotorCompatibleAiConfig\(\) const' \
   'void UpdateYawRoute\(\)' 'rotor_ff_enabled_' \
   'AI compatibility gate must not alter legacy rotor feedforward'
 
-need_count 'case YawRouteState::Action::' 5 'all route actions dispatched explicitly'
+need_count 'case YawRouteState::Action::' 10 \
+  'all route actions dispatched explicitly for parsing and solving'
 need_in_lines 'case YawRouteState::Action::LEGACY_RUN:' \
   'case YawRouteState::Action::HOLD_CURRENT:' \
   'ctrl_mode_snapshot_ == CMD::Mode::CMD_OP_CTRL' \
@@ -287,5 +461,18 @@ need_multiline \
 need_multiline \
   '(?s)const float PIT_ERROR = target_pit_cmd_ - euler_\.Pitch\(\);\s*const float PIT_ANGLE_LOOP_OMEGA =\s*pid_pit_angle_\.Calculate\(PIT_ERROR, 0\.0f, dt_\);\s*const float TARGET_PIT_OMEGA = PIT_ANGLE_LOOP_OMEGA \+ target_pit_dot_;\s*const float PIT_ALPHA =\s*\(PIT_ANGLE_LOOP_OMEGA - last_pit_angle_loop_omega_\) / dt_ \+\s*target_pit_ddot_;\s*const float PITCH_FEEDFORWARD =\s*j_pit_ \* PIT_ALPHA -\s*this->pit_lc_ \* sinf\(euler_\.Pitch\(\) \+ this->pit_theta_\);\s*pid_pit_omega_\.SetFeedForward\(PITCH_FEEDFORWARD\);\s*pit_output_ =\s*pid_pit_omega_\.Calculate\(TARGET_PIT_OMEGA, gyro_data_\.y\(\), dt_\);\s*last_pit_angle_loop_omega_ = PIT_ANGLE_LOOP_OMEGA;' \
   'complete unchanged Pitch gravity and control formula'
+
+need_count 'motor_yaw_->Control\(' 1 'one Yaw submission site'
+need_multiline \
+  '(?s)motor_yaw_->Control\(command\);.*CommitAppliedTorque\(command\.torque\)' \
+  'commit follows actual Control'
+need_multiline \
+  '(?s)void InvalidateSubmittedYawTorque\(\).*last_submitted_yaw_torque_valid_ = false;.*RequestRearm\(\)' \
+  'non-Control action clears ledger and rearms'
+need 'bool SolveAiYaw\(\)' 'AI solve helper'
+need 'void SolveLegacyYaw\(\)' 'legacy solve helper'
+need_before 'std::isfinite\(yaw_output_\)' 'ControlYawMotor\(' \
+  'finite guard before Yaw submission'
+check_yaw_solve_and_submit_ledger
 
 echo 'PASS: AI Yaw integration regression'
