@@ -66,6 +66,94 @@ forbid_in_lines() {
   fi
 }
 
+check_yaw_writes_route_gated() {
+  python3 - "${HEADER}" <<'PY'
+import collections
+import pathlib
+import re
+import sys
+
+
+source = pathlib.Path(sys.argv[1]).read_text()
+non_code = re.compile(
+    r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', re.S
+)
+
+
+def mask(match):
+    return "".join("\n" if char == "\n" else " " for char in match.group())
+
+
+code = non_code.sub(mask, source)
+
+
+def matching_brace(open_brace, description):
+    depth = 0
+    for index in range(open_brace, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    raise SystemExit(f"unbalanced: {description}")
+
+
+parse_match = re.search(r"\bvoid\s+ParseCMD\s*\(\s*\)\s*\{", code)
+if parse_match is None:
+    raise SystemExit("missing: ParseCMD body")
+parse_open = parse_match.end() - 1
+parse_close = matching_brace(parse_open, "ParseCMD")
+
+switch_pattern = re.compile(
+    r"\bswitch\s*\(\s*yaw_route_decision_\.action\s*\)\s*\{"
+)
+switch_matches = list(switch_pattern.finditer(code, parse_open + 1, parse_close))
+if len(switch_matches) != 1:
+    raise SystemExit(f"wrong count ({len(switch_matches)} != 1): Yaw route switch")
+switch_open = switch_matches[0].end() - 1
+switch_close = matching_brace(switch_open, "Yaw route switch")
+if switch_close > parse_close:
+    raise SystemExit("misnested: Yaw route switch outside ParseCMD")
+
+target = r"target_yaw_(?:cmd|dot|ddot)_"
+write_pattern = re.compile(
+    rf"(?:(?P<prefix>\+\+|--)\s*(?P<prefix_name>\b{target}\b)|"
+    rf"(?P<name>\b{target}\b)\s*"
+    rf"(?P<op>\+\+|--|<<=|>>=|[+\-*/%&|^]=|=(?!=)))"
+)
+writes = []
+for write in write_pattern.finditer(code, parse_open + 1, parse_close):
+    group = "prefix_name" if write.group("prefix_name") is not None else "name"
+    name = write.group(group)
+    operation = write.group("prefix") or write.group("op")
+    writes.append((name, operation, write.start(group)))
+
+outside = [item for item in writes if not switch_open < item[2] < switch_close]
+if outside:
+    name, _, position = outside[0]
+    line = source.count("\n", 0, position) + 1
+    raise SystemExit(f"ungated Yaw target write at ParseCMD line {line}: {name}")
+
+actual = collections.Counter((name, operation) for name, operation, _ in writes)
+expected = collections.Counter(
+    {
+        ("target_yaw_cmd_", "+="): 4,
+        ("target_yaw_cmd_", "="): 2,
+        ("target_yaw_dot_", "="): 6,
+        ("target_yaw_ddot_", "="): 6,
+    }
+)
+missing = {
+    key: count - actual[key]
+    for key, count in expected.items()
+    if actual[key] < count
+}
+if missing:
+    raise SystemExit(f"missing expected route-gated Yaw writes: {missing}")
+PY
+}
+
 need '#include "YawLqrEso.hpp"' 'algorithm include'
 need_multiline \
   'rotor_ff_enabled: false\s*- ai_yaw_lqr_eso_enable: false\s*- yaw_lqr_eso:' \
@@ -98,9 +186,7 @@ need_multiline \
   'route mapper is the first ParseCMD action before dt return'
 need_before 'UpdateYawRoute\(\);' 'switch \(yaw_route_decision_\.action\)' \
   'route before target dispatch'
-need_before 'switch \(yaw_route_decision_\.action\)' \
-  'target_yaw_(cmd_|dot_|ddot_)\s*[-+]?=' \
-  'route action before every Yaw target write'
+check_yaw_writes_route_gated
 
 need_in_lines 'void UpdateYawRoute\(\)' '^  \}' \
   'ctrl_mode_snapshot_ = cmd_\.GetCtrlMode\(\);\s*ai_gimbal_status_snapshot_ = cmd_\.GetAIGimbalStatus\(\);\s*ai_yaw_lqr_eso_enable_snapshot_ = ai_yaw_lqr_eso_enable_;\s*yaw_lqr_eso_config_snapshot_ = yaw_lqr_eso_config_;' \
