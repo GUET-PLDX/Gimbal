@@ -83,8 +83,20 @@ need_multiline \
   'thread_priority: LibXR::Thread::Priority::MEDIUM\r?\n  - rotor_ff_enabled: false' \
   'rotor feedforward manifest option appended after thread priority'
 need_multiline \
-  'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false,\s*bool ai_yaw_lqr_eso_enable = false,\s*YawLqrEso::Config yaw_lqr_eso = \{\}\)' \
-  'AI Yaw options appended after rotor feedforward'
+  'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false,\s*bool ai_yaw_lqr_eso_enable = false,\s*YawLqrEso::Config yaw_lqr_eso = \{\},\s*const char\* euler_topic_name = "ahrs_euler",\s*const char\* gyro_topic_name = "bmi088_gyro"\)' \
+  'AI Yaw options and compatible IMU Topic defaults appended in order'
+need 'const char\* euler_topic_name_' 'stored Euler Topic name'
+need 'const char\* gyro_topic_name_' 'stored gyro Topic name'
+need_multiline \
+  'ASyncSubscriber<LibXR::EulerAngle<float>> euler_suber\s*\(\s*gimbal->euler_topic_name_\s*\)' \
+  'Euler subscriber uses configured Topic name'
+need_multiline \
+  'ASyncSubscriber<Eigen::Matrix<float, 3, 1>> gyro_suber\s*\(\s*gimbal->gyro_topic_name_\s*\)' \
+  'gyro subscriber uses configured Topic name'
+forbid 'ASyncSubscriber<LibXR::EulerAngle<float>>[^;]*"gimbal_euler"' \
+  'fixed Gimbal Euler subscriber Topic'
+forbid 'ASyncSubscriber<Eigen::Matrix<float, 3, 1>>[^;]*"gimbal_gyro"' \
+  'fixed Gimbal gyro subscriber Topic'
 need 'bool rotor_ff_enabled_ = false' 'default-disabled feature flag member'
 need 'float chassis_gyro_z_ = 0\.0f' 'zero-initialized chassis gyro member'
 need 'uint32_t dualboard_chassis_mode_ = 0U' \

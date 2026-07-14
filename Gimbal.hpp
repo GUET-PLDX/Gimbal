@@ -84,6 +84,8 @@ constructor_args:
       lqi_enable: false
       torque_bias_enable: false
       torque_slew_enable: true
+  - euler_topic_name: ahrs_euler
+  - gyro_topic_name: bmi088_gyro
 template_args: []
 required_hardware: []
 depends:
@@ -159,8 +161,8 @@ class Gimbal : public LibXR::Application {
    *
    * 是否启用AI Yaw LQR/ESO路由
    * @param yaw_lqr_eso AI Yaw LQR/ESO参数
-
-
+   * @param euler_topic_name 欧拉角数据主题名称
+   * @param gyro_topic_name 陀螺仪数据主题名称
    */
   Gimbal(
       LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app, CMD& cmd,
@@ -174,7 +176,9 @@ class Gimbal : public LibXR::Application {
       Referee* referee,
       LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,
       bool rotor_ff_enabled = false, bool ai_yaw_lqr_eso_enable = false,
-      YawLqrEso::Config yaw_lqr_eso = {})
+      YawLqrEso::Config yaw_lqr_eso = {},
+      const char* euler_topic_name = "ahrs_euler",
+      const char* gyro_topic_name = "bmi088_gyro")
       : cmd_(cmd),
         pid_yaw_angle_(pid_yaw_angle),
         pid_yaw_omega_(pid_yaw_omega),
@@ -198,6 +202,8 @@ class Gimbal : public LibXR::Application {
         rotor_ff_enabled_(rotor_ff_enabled),
         ai_yaw_lqr_eso_enable_(ai_yaw_lqr_eso_enable),
         yaw_lqr_eso_config_(yaw_lqr_eso),
+        euler_topic_name_(euler_topic_name),
+        gyro_topic_name_(gyro_topic_name),
         chassis_gyro_z_topic_(LibXR::Topic::FindOrCreate<float>(
             "chassis_gyro_z", nullptr, false)),
         dualboard_chassis_mode_topic_(LibXR::Topic::FindOrCreate<uint32_t>(
@@ -250,9 +256,9 @@ class Gimbal : public LibXR::Application {
   static void ThreadFunc(Gimbal* gimbal) {
     LibXR::Topic::ASyncSubscriber<CMD::GimbalCMD> cmd_suber("gimbal_cmd");
     LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>> euler_suber(
-        "gimbal_euler");
+        gimbal->euler_topic_name_);
     LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>> gyro_suber(
-        "gimbal_gyro");
+        gimbal->gyro_topic_name_);
     LibXR::Topic::ASyncSubscriber<float> chassis_gyro_z_suber(
         LibXR::Topic(gimbal->chassis_gyro_z_topic_));
     LibXR::Topic::ASyncSubscriber<uint32_t> dualboard_chassis_mode_suber(
@@ -579,6 +585,8 @@ class Gimbal : public LibXR::Application {
   uint64_t cmd_sample_seq_ = 0U;
   float chassis_gyro_z_ = 0.0f;
   uint32_t dualboard_chassis_mode_ = 0U;
+  const char* euler_topic_name_;
+  const char* gyro_topic_name_;
   LibXR::Topic::TopicHandle chassis_gyro_z_topic_;
   LibXR::Topic::TopicHandle dualboard_chassis_mode_topic_;
   LibXR::Thread thread_;

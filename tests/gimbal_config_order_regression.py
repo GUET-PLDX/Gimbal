@@ -105,8 +105,10 @@ expected_tail = [
     "rotor_ff_enabled",
     "ai_yaw_lqr_eso_enable",
     "yaw_lqr_eso",
+    "euler_topic_name",
+    "gyro_topic_name",
 ]
-if manifest_names[-3:] != expected_tail or any(
+if manifest_names[-5:] != expected_tail or any(
     manifest_names.count(name) != 1 for name in expected_tail
 ):
     raise SystemExit("manifest constructor order mismatch")
@@ -117,6 +119,15 @@ master_default = next(
 )
 if master_default is not False:
     raise SystemExit("route default must be false")
+topic_defaults = {
+    name: next(item[name] for item in manifest_args if name in item)
+    for name in ("euler_topic_name", "gyro_topic_name")
+}
+if topic_defaults != {
+    "euler_topic_name": "ahrs_euler",
+    "gyro_topic_name": "bmi088_gyro",
+}:
+    raise SystemExit("IMU Topic defaults mismatch")
 yaw_manifest = next(
     item["yaw_lqr_eso"] for item in manifest_args if "yaw_lqr_eso" in item
 )
@@ -147,8 +158,12 @@ if not args.header_only:
             return str(value)
 
         expected = "{" + ",".join(cpp(yaw_yaml[key]) for key in EXPECTED_FIELDS) + "}"
+        expected += (
+            f',"{gimbal["constructor_args"]["euler_topic_name"]}"'
+            f',"{gimbal["constructor_args"]["gyro_topic_name"]}"'
+        )
         generated = re.sub(r"\s+", "", pathlib.Path(args.generated).read_text())
         if expected not in generated:
-            raise SystemExit("generated aggregate mismatch")
+            raise SystemExit("generated aggregate and Topic suffix mismatch")
 
 print("PASS: Gimbal config order regression")
