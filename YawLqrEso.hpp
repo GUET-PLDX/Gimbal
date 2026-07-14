@@ -117,7 +117,7 @@ class YawLqrEso final {
     z2_ = omega_rad_s;
     z3_ = 0.0f;
     observer_ready_ = false;
-    observer_fresh_ = false;
+    observer_fresh_ = true;
 
     theta_integral_rad_s_ = 0.0f;
 
@@ -143,8 +143,10 @@ class YawLqrEso final {
         !std::isfinite(reference.omega_rad_s) ||
         !std::isfinite(reference.alpha_rad_s2) ||
         !std::isfinite(feedback.theta_rad) ||
-        !std::isfinite(feedback.omega_rad_s) || !std::isfinite(dt_s) ||
-        dt_s <= MIN_DT_S || dt_s > MAX_DT_S) {
+        !std::isfinite(feedback.omega_rad_s) ||
+        (config.torque_bias_enable && (!feedback.torque_measurement_valid ||
+                                       !std::isfinite(feedback.tau_meas_nm))) ||
+        !std::isfinite(dt_s) || dt_s <= MIN_DT_S || dt_s > MAX_DT_S) {
       return output;
     }
 
@@ -160,10 +162,112 @@ class YawLqrEso final {
     output.e_omega_rad_s = feedback.omega_rad_s - reference.omega_rad_s;
     output.tau_ff_alpha_nm = config.j_kg_m2 * reference.alpha_rad_s2;
     output.tau_ff_viscous_nm = config.b_nms_rad * reference.omega_rad_s;
-    output.tau_lqr_nm = output.tau_ff_alpha_nm + output.tau_ff_viscous_nm -
+
+    if (!config.eso_enable) {
+      z1_ = NEXT_THETA_UNWRAPPED_RAD;
+      z2_ = feedback.omega_rad_s;
+      z3_ = 0.0f;
+      observer_ready_ = false;
+      observer_fresh_ = false;
+    } else if (!previous_eso_enable_ || observer_fresh_) {
+      z1_ = NEXT_THETA_UNWRAPPED_RAD;
+      z2_ = feedback.omega_rad_s;
+      z3_ = 0.0f;
+      observer_ready_ = false;
+      observer_fresh_ = false;
+    } else {
+      const float B0 = 1.0f / config.j_kg_m2;
+      const float BANDWIDTH_SQUARED =
+          config.eso_bandwidth_rad_s * config.eso_bandwidth_rad_s;
+      const float BETA1 = 3.0f * config.eso_bandwidth_rad_s;
+      const float BETA2 = 3.0f * BANDWIDTH_SQUARED;
+      const float BETA3 = BANDWIDTH_SQUARED * config.eso_bandwidth_rad_s;
+      const float OBSERVER_ERROR_RAD = NEXT_THETA_UNWRAPPED_RAD - z1_;
+      const float Z1_DOT = z2_ + BETA1 * OBSERVER_ERROR_RAD;
+      const float Z2_DOT = -(config.b_nms_rad / config.j_kg_m2) * z2_ +
+                           B0 * last_applied_torque_nm_ + z3_ +
+                           BETA2 * OBSERVER_ERROR_RAD;
+      const float Z3_DOT = BETA3 * OBSERVER_ERROR_RAD;
+      const float Z1_CANDIDATE = z1_ + dt_s * Z1_DOT;
+      const float Z2_CANDIDATE = z2_ + dt_s * Z2_DOT;
+      const float Z3_CANDIDATE = z3_ + dt_s * Z3_DOT;
+
+      if (std::isfinite(Z1_CANDIDATE) && std::isfinite(Z2_CANDIDATE) &&
+          std::isfinite(Z3_CANDIDATE)) {
+        z1_ = Z1_CANDIDATE;
+        z2_ = Z2_CANDIDATE;
+        z3_ = Z3_CANDIDATE;
+        observer_ready_ = true;
+      } else {
+        z1_ = NEXT_THETA_UNWRAPPED_RAD;
+        z2_ = feedback.omega_rad_s;
+        z3_ = 0.0f;
+        observer_ready_ = false;
+        observer_fresh_ = true;
+      }
+    }
+
+    output.tau_ff_coulomb_nm =
+        config.coulomb_enable
+            ? config.tau_coulomb_nm *
+                  std::tanh(reference.omega_rad_s / config.coulomb_smooth_rad_s)
+            : 0.0f;
+
+    if (!config.lqi_enable) {
+      theta_integral_rad_s_ = 0.0f;
+    } else {
+      theta_integral_rad_s_ =
+          Clamp(theta_integral_rad_s_ + output.e_theta_rad * dt_s,
+                -config.theta_integral_limit_rad_s,
+                config.theta_integral_limit_rad_s);
+    }
+    output.tau_lqi_nm = -config.k_i * theta_integral_rad_s_;
+
+    output.tau_lqr_nm = output.tau_ff_alpha_nm + output.tau_ff_viscous_nm +
+                        output.tau_ff_coulomb_nm + output.tau_lqi_nm -
                         config.k_theta * output.e_theta_rad -
                         config.k_omega * output.e_omega_rad_s;
-    output.tau_pre_limit_nm = output.tau_lqr_nm;
+
+    if (config.eso_comp_enable && observer_ready_) {
+      const float B0 = 1.0f / config.j_kg_m2;
+      output.tau_eso_raw_nm =
+          Clamp(-config.eso_comp_gain * z3_ / B0, -config.eso_comp_limit_nm,
+                config.eso_comp_limit_nm);
+      const bool OMEGA_GATE_PASSED =
+          config.eso_omega_gate_rad_s <= 0.0f ||
+          std::fabs(feedback.omega_rad_s) <= config.eso_omega_gate_rad_s;
+      const bool ALPHA_GATE_PASSED =
+          config.eso_alpha_gate_rad_s2 <= 0.0f ||
+          std::fabs(reference.alpha_rad_s2) <= config.eso_alpha_gate_rad_s2;
+      if (OMEGA_GATE_PASSED && ALPHA_GATE_PASSED) {
+        output.tau_eso_active_nm = output.tau_eso_raw_nm;
+        output.eso_comp_active = true;
+      }
+    }
+
+    const float TORQUE_WITHOUT_BIAS_NM =
+        output.tau_lqr_nm + output.tau_eso_active_nm;
+    if (!config.torque_bias_enable) {
+      tau_meas_lpf_nm_ = 0.0f;
+      tau_bias_nm_ = 0.0f;
+    } else {
+      if (!previous_torque_bias_enable_) {
+        tau_meas_lpf_nm_ = feedback.tau_meas_nm;
+      } else {
+        tau_meas_lpf_nm_ += config.tau_meas_lpf_alpha *
+                            (feedback.tau_meas_nm - tau_meas_lpf_nm_);
+      }
+      tau_bias_nm_ = Clamp(
+          tau_bias_nm_ + config.tau_bias_ki *
+                             (TORQUE_WITHOUT_BIAS_NM - tau_meas_lpf_nm_) * dt_s,
+          -config.tau_bias_limit_nm, config.tau_bias_limit_nm);
+    }
+    output.tau_bias_nm = tau_bias_nm_;
+    output.tau_pre_limit_nm = TORQUE_WITHOUT_BIAS_NM + output.tau_bias_nm;
+    output.z1 = z1_;
+    output.z2 = z2_;
+    output.z3 = z3_;
+    output.observer_ready = observer_ready_;
 
     if (!BaseOutputIsFinite(output)) {
       return {};
@@ -252,6 +356,11 @@ class YawLqrEso final {
     if (config.torque_slew_enable && !previous_torque_slew_enable_) {
       slew_anchor_torque_nm_ = last_applied_torque_nm_;
     }
+    previous_eso_enable_ = config.eso_enable;
+    previous_eso_comp_enable_ = config.eso_comp_enable;
+    previous_coulomb_enable_ = config.coulomb_enable;
+    previous_lqi_enable_ = config.lqi_enable;
+    previous_torque_bias_enable_ = config.torque_bias_enable;
     previous_torque_slew_enable_ = config.torque_slew_enable;
     output.valid = true;
     return output;
@@ -309,7 +418,12 @@ class YawLqrEso final {
            std::isfinite(output.e_omega_rad_s) &&
            std::isfinite(output.tau_ff_alpha_nm) &&
            std::isfinite(output.tau_ff_viscous_nm) &&
+           std::isfinite(output.tau_ff_coulomb_nm) &&
+           std::isfinite(output.tau_lqi_nm) &&
            std::isfinite(output.tau_lqr_nm) &&
+           std::isfinite(output.tau_eso_raw_nm) &&
+           std::isfinite(output.tau_eso_active_nm) &&
+           std::isfinite(output.tau_bias_nm) &&
            std::isfinite(output.tau_pre_limit_nm) &&
            std::isfinite(output.tau_cmd_before_slew_nm) &&
            std::isfinite(output.tau_cmd_nm);
