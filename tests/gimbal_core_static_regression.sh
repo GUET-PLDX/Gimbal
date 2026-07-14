@@ -83,8 +83,8 @@ need_multiline \
   'thread_priority: LibXR::Thread::Priority::MEDIUM\r?\n  - rotor_ff_enabled: false' \
   'rotor feedforward manifest option appended after thread priority'
 need_multiline \
-  'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false\)' \
-  'rotor feedforward constructor option appended after thread priority'
+  'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false,\s*bool ai_yaw_lqr_eso_enable = false,\s*YawLqrEso::Config yaw_lqr_eso = \{\}\)' \
+  'AI Yaw options appended after rotor feedforward'
 need 'bool rotor_ff_enabled_ = false' 'default-disabled feature flag member'
 need 'float chassis_gyro_z_ = 0\.0f' 'zero-initialized chassis gyro member'
 need 'uint32_t dualboard_chassis_mode_ = 0U' \
