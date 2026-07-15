@@ -7,7 +7,7 @@ on:
     - cron: '0 3 1 * *'  # 每月1日凌晨3点（UTC）自动触发
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -147,8 +147,16 @@ jobs:
           cmake ..
           make
 
+  tag:
+    needs: build
+    if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      XR_MODULE_NAME: ${{ github.event.repository.name }}
+    steps:
       - name: Create Tag via GitHub API
-        if: ${{ success() && github.event_name != 'pull_request' }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
