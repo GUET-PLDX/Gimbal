@@ -461,6 +461,10 @@ class Gimbal : public LibXR::Application {
       pid_yaw_omega_.SetFeedForward(0.0f);
       last_pit_angle_loop_omega_ = 0.0f;
       last_yaw_angle_loop_omega_ = 0.0f;
+      yaw_output_ = 0.0f;
+      if (ai_yaw_active_) {
+        yaw_lqr_eso_reset_pending_ = true;
+      }
     }
 
     if (!std::isfinite(yaw_output_)) {

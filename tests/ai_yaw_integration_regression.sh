@@ -110,6 +110,9 @@ need_multiline \
 need_multiline \
   'if \(ai_yaw_active_\) \{\s*SolveAiYaw\(\);\s*\} else \{\s*SolveLegacyYaw\(\);\s*\}' \
   'direct solve selection without action enum'
+need_multiline \
+  'if \(dt_valid_\) \{\s*PitchLimit\(.*Solve\(\);\s*\} else \{\s*pid_pit_omega_\.SetFeedForward\(0\.0f\);\s*pid_yaw_omega_\.SetFeedForward\(0\.0f\);\s*last_pit_angle_loop_omega_ = 0\.0f;\s*last_yaw_angle_loop_omega_ = 0\.0f;\s*yaw_output_ = 0\.0f;\s*if \(ai_yaw_active_\) \{\s*yaw_lqr_eso_reset_pending_ = true;\s*\}\s*\}' \
+  'invalid dt zeros Yaw output and rearms the active AI controller'
 need 'void ControlYawMotor\(const Motor::MotorCmd& command\)' \
   'submission method without route confirmation parameter'
 need_before 'motor_yaw_->Control\(command\);' \
