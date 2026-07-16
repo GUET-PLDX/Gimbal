@@ -83,8 +83,8 @@ need_multiline \
   'thread_priority: LibXR::Thread::Priority::MEDIUM\r?\n  - rotor_ff_enabled: false' \
   'rotor feedforward manifest option appended after thread priority'
 need_multiline \
-  'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false,\s*bool ai_yaw_lqr_eso_enable = false,\s*YawLqrEso::Config yaw_lqr_eso = \{\},\s*const char\* euler_topic_name = "ahrs_euler",\s*const char\* gyro_topic_name = "bmi088_gyro"\)' \
-  'AI Yaw options and compatible IMU Topic defaults appended in order'
+  'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false,\s*YawLqrEso::Config yaw_lqr_eso = \{\},\s*const char\* euler_topic_name = "ahrs_euler",\s*const char\* gyro_topic_name = "bmi088_gyro"\)' \
+  'AI Yaw config and compatible IMU Topic defaults appended in order'
 need 'const char\* euler_topic_name_' 'stored Euler Topic name'
 need 'const char\* gyro_topic_name_' 'stored gyro Topic name'
 need_multiline \

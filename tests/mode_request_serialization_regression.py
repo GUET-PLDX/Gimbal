@@ -176,8 +176,7 @@ require(
 
 control_yaw = method_body(
     code,
-    r"\bvoid\s+ControlYawMotor\s*\(\s*const\s+Motor::MotorCmd&\s+command\s*,\s*"
-    r"bool\s+valid_lqr_command\s*\)",
+    r"\bvoid\s+ControlYawMotor\s*\(\s*const\s+Motor::MotorCmd&\s+command\s*\)",
     "ControlYawMotor",
 )
 require(

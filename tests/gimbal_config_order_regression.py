@@ -103,22 +103,14 @@ if any(not isinstance(item, dict) or len(item) != 1 for item in manifest_args):
 manifest_names = [next(iter(item)) for item in manifest_args]
 expected_tail = [
     "rotor_ff_enabled",
-    "ai_yaw_lqr_eso_enable",
     "yaw_lqr_eso",
     "euler_topic_name",
     "gyro_topic_name",
 ]
-if manifest_names[-5:] != expected_tail or any(
-    manifest_names.count(name) != 1 for name in expected_tail
-):
+if manifest_names[-4:] != expected_tail:
     raise SystemExit("manifest constructor order mismatch")
-master_default = next(
-    item["ai_yaw_lqr_eso_enable"]
-    for item in manifest_args
-    if "ai_yaw_lqr_eso_enable" in item
-)
-if master_default is not False:
-    raise SystemExit("route default must be false")
+if "ai_yaw_lqr_eso_enable" in manifest_names:
+    raise SystemExit("removed route master remains in manifest")
 topic_defaults = {
     name: next(item[name] for item in manifest_args if name in item)
     for name in ("euler_topic_name", "gyro_topic_name")
@@ -145,9 +137,10 @@ if not args.header_only:
         raise SystemExit("--config is required without --header-only")
     config = yaml.safe_load(pathlib.Path(args.config).read_text())
     gimbal = next(item for item in config["modules"] if item.get("name") == "Gimbal")
-    if gimbal["constructor_args"]["ai_yaw_lqr_eso_enable"] is not True:
-        raise SystemExit("target route is not enabled")
-    yaw_yaml = gimbal["constructor_args"]["yaw_lqr_eso"]
+    gimbal_args = gimbal["constructor_args"]
+    if "ai_yaw_lqr_eso_enable" in gimbal_args:
+        raise SystemExit("removed route master remains in target YAML")
+    yaw_yaml = gimbal_args["yaw_lqr_eso"]
     if tuple(yaw_yaml.keys()) != EXPECTED_FIELDS:
         raise SystemExit("YAML order mismatch")
     if args.generated:
