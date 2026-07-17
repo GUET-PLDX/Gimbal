@@ -444,7 +444,7 @@ class Gimbal : public LibXR::Application {
       last_pit_angle_loop_omega_ = 0.0f;
       last_yaw_angle_loop_omega_ = 0.0f;
       motor_yaw_->Relax();
-      InvalidateSubmittedYawTorque();
+      InvalidateYawControllerState();
       motor_pit_->Relax();
       return;
     }
@@ -631,9 +631,13 @@ class Gimbal : public LibXR::Application {
     pid_yaw_omega_.Reset();
   }
 
-  void InvalidateSubmittedYawTorque() {
+  void ClearSubmittedYawTorqueLedger() {
     last_submitted_yaw_torque_nm_ = 0.0f;
     last_submitted_yaw_torque_valid_ = false;
+  }
+
+  void InvalidateYawControllerState() {
+    ClearSubmittedYawTorqueLedger();
     yaw_lqr_eso_reset_pending_ = true;
   }
 
@@ -694,10 +698,10 @@ class Gimbal : public LibXR::Application {
   void ControlYawMotor(const Motor::MotorCmd& command) {
     if (motor_yaw_feedback_.state == 0) {
       motor_yaw_->Enable();
-      InvalidateSubmittedYawTorque();
+      ClearSubmittedYawTorqueLedger();
     } else if (motor_yaw_feedback_.state != 1) {
       motor_yaw_->ClearError();
-      InvalidateSubmittedYawTorque();
+      ClearSubmittedYawTorqueLedger();
     } else {
       if (ConsumePendingRelaxRequest()) {
         return;
@@ -865,6 +869,6 @@ class Gimbal : public LibXR::Application {
       default:
         break;
     }
-    InvalidateSubmittedYawTorque();
+    InvalidateYawControllerState();
   }
 };

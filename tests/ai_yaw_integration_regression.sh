@@ -115,9 +115,21 @@ need_multiline \
   'invalid dt zeros Yaw output and rearms the active AI controller'
 need 'void ControlYawMotor\(const Motor::MotorCmd& command\)' \
   'submission method without route confirmation parameter'
-need_before 'motor_yaw_->Control\(command\);' \
-  'yaw_lqr_eso_\.CommitAppliedTorque\(command\.torque\);' \
-  'commit follows actual Motor::Control call'
+need_multiline \
+  'void ClearSubmittedYawTorqueLedger\(\) \{\s*last_submitted_yaw_torque_nm_ = 0\.0f;\s*last_submitted_yaw_torque_valid_ = false;\s*\}' \
+  'submitted-torque ledger invalidation without controller rearm'
+need_multiline \
+  'void InvalidateYawControllerState\(\) \{\s*ClearSubmittedYawTorqueLedger\(\);\s*yaw_lqr_eso_reset_pending_ = true;\s*\}' \
+  'controller invalidation explicitly rearms after clearing its ledger'
+need_multiline \
+  'void ControlYawMotor\(const Motor::MotorCmd& command\) \{\s*if \(motor_yaw_feedback_\.state == 0\) \{\s*motor_yaw_->Enable\(\);\s*ClearSubmittedYawTorqueLedger\(\);\s*\} else if \(motor_yaw_feedback_\.state != 1\) \{\s*motor_yaw_->ClearError\(\);\s*ClearSubmittedYawTorqueLedger\(\);\s*\} else \{\s*if \(ConsumePendingRelaxRequest\(\)\) \{\s*return;\s*\}\s*motor_yaw_->Control\(command\);\s*last_submitted_yaw_torque_nm_ = command\.torque;\s*last_submitted_yaw_torque_valid_ = true;\s*yaw_lqr_eso_\.CommitAppliedTorque\(command\.torque\);\s*\}\s*\}' \
+  'Enable and ClearError discard only the candidate ledger while recovered Control commits the applied torque'
+
+forbid_in_lines \
+  'void ControlYawMotor\(const Motor::MotorCmd& command\)' \
+  '/\*\*' \
+  'yaw_lqr_eso_reset_pending_|InvalidateYawControllerState' \
+  'motor-not-ready submission must not rearm the controller after a valid AI calculation'
 
 need_count 'motor_yaw_->Control\(' 1 'one Yaw submission site'
 need 'void SolveLegacyYaw\(\)' 'legacy solve helper'
