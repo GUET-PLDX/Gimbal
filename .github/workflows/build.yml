@@ -114,6 +114,11 @@ jobs:
         run: |
           pip3 install xrobot libxr
 
+      - name: Install regression dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ripgrep
+
       - name: Run Gimbal regression tests
         working-directory: Modules/${{ env.XR_MODULE_NAME }}
         run: |

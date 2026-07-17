@@ -35,6 +35,31 @@ require(
 build_text = yaml.safe_dump(build_job)
 require("createRef" not in build_text, "build job must not create tags")
 
+build_steps = build_job.get("steps", [])
+require(isinstance(build_steps, list), "build job steps must be a list")
+regression_step_index = next(
+    (
+        index
+        for index, step in enumerate(build_steps)
+        if step.get("name") == "Run Gimbal regression tests"
+    ),
+    None,
+)
+require(regression_step_index is not None, "Gimbal regression test step missing")
+ripgrep_install_index = next(
+    (
+        index
+        for index, step in enumerate(build_steps)
+        if re.search(r"apt-get\s+install[^\n]*\bripgrep\b", step.get("run", ""))
+    ),
+    None,
+)
+require(
+    ripgrep_install_index is not None
+    and ripgrep_install_index < regression_step_index,
+    "build job must install ripgrep before Gimbal regression tests",
+)
+
 tag_job = jobs["tag"]
 needs = tag_job.get("needs")
 if isinstance(needs, list):
