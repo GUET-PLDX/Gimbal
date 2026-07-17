@@ -51,8 +51,6 @@ for config_name in config_names:
         ("BMI088", bmi088_args, "gyro_topic_name"),
         ("MadgwickAHRS", madgwick_args, "gyro_topic_name"),
         ("MadgwickAHRS", madgwick_args, "euler_topic_name"),
-        ("Gimbal", gimbal_args, "gyro_topic_name"),
-        ("Gimbal", gimbal_args, "euler_topic_name"),
     )
     missing = [
         f"{module_name}.{field_name}"
@@ -68,21 +66,25 @@ for config_name in config_names:
     bmi088_gyro = bmi088_args["gyro_topic_name"]
     madgwick_gyro = madgwick_args["gyro_topic_name"]
     madgwick_euler = madgwick_args["euler_topic_name"]
-    gimbal_gyro = gimbal_args["gyro_topic_name"]
-    gimbal_euler = gimbal_args["euler_topic_name"]
+    removed = {"gyro_topic_name", "euler_topic_name"} & set(gimbal_args)
+    if removed:
+        failures.append(
+            f"{config_name}: removed Gimbal Topic bindings remain: "
+            f"{', '.join(sorted(removed))}"
+        )
     if madgwick_gyro != bmi088_gyro:
         failures.append(
             f"{config_name}: Madgwick gyro {madgwick_gyro!r} != "
             f"BMI088 gyro {bmi088_gyro!r}"
         )
-    if gimbal_gyro != bmi088_gyro:
+    if bmi088_gyro != "gimbal_gyro":
         failures.append(
-            f"{config_name}: Gimbal gyro {gimbal_gyro!r} != "
+            f"{config_name}: fixed Gimbal gyro 'gimbal_gyro' != "
             f"BMI088 gyro {bmi088_gyro!r}"
         )
-    if gimbal_euler != madgwick_euler:
+    if madgwick_euler != "gimbal_euler":
         failures.append(
-            f"{config_name}: Gimbal Euler {gimbal_euler!r} != "
+            f"{config_name}: fixed Gimbal Euler 'gimbal_euler' != "
             f"Madgwick Euler {madgwick_euler!r}"
         )
 

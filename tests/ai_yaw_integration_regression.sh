@@ -6,8 +6,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ALGORITHM_HEADER="${SCRIPT_DIR}/../YawLqrEso.hpp"
 
 bash "${SCRIPT_DIR}/gimbal_core_static_regression.sh" "${HEADER}"
-python3 "${SCRIPT_DIR}/mode_request_serialization_regression.py" \
-  --header "${HEADER}"
 
 need() {
   rg -q -- "$1" "${HEADER}" || { echo "missing: $2" >&2; exit 1; }
@@ -143,9 +141,7 @@ need 'bool yaw_lqr_eso_reset_pending_ = true' 'controller reset lifecycle state'
 need_multiline \
   'const bool AI_YAW_ACTIVE =\s*ctrl_mode_snapshot_ == CMD::Mode::CMD_AUTO_CTRL &&\s*ai_gimbal_status_snapshot_;' \
   'exact CMD-based AI selection'
-need_multiline \
-  'if \(AI_YAW_ACTIVE && !ai_yaw_active_\) \{\s*yaw_lqr_eso_reset_pending_ = true;\s*\} else if \(!AI_YAW_ACTIVE && ai_yaw_active_\) \{\s*ResetLegacyYawToCurrent\(\);\s*\}\s*ai_yaw_active_ = AI_YAW_ACTIVE;' \
-  'AI entry and exit edge handling'
+need 'ai_yaw_active_ = AI_YAW_ACTIVE' 'direct AI active-state assignment'
 need_multiline \
   'if \(yaw_lqr_eso_reset_pending_\) \{.*yaw_lqr_eso_\.Reset\(' \
   'reset before AI calculation'
@@ -161,24 +157,13 @@ need_multiline \
 need_multiline \
   'if \(ai_yaw_active_\) \{\s*SolveAiYaw\(\);\s*\} else \{\s*SolveLegacyYaw\(\);\s*\}' \
   'direct solve selection without action enum'
-need_multiline \
-  'if \(dt_valid_\) \{\s*PitchLimit\(.*Solve\(\);\s*\} else \{\s*pid_pit_omega_\.SetFeedForward\(0\.0f\);\s*pid_yaw_omega_\.SetFeedForward\(0\.0f\);\s*last_pit_angle_loop_omega_ = 0\.0f;\s*last_yaw_angle_loop_omega_ = 0\.0f;\s*yaw_output_ = 0\.0f;\s*if \(ai_yaw_active_\) \{\s*yaw_lqr_eso_reset_pending_ = true;\s*\}\s*\}' \
-  'invalid dt zeros Yaw output and rearms the active AI controller'
-need_in_lines \
-  'void Control\(\)' \
-  'void OnMonitor\(\)' \
-  'motor_yaw_->Relax\(\);\s*InvalidateYawControllerState\(\);\s*motor_pit_->Relax\(\);\s*return;' \
-  'feedback-offline RELAX invalidates the AI Yaw controller state'
 need 'void ControlYawMotor\(const Motor::MotorCmd& command\)' \
   'submission method without route confirmation parameter'
 need_multiline \
   'void ClearSubmittedYawTorqueLedger\(\) \{\s*last_submitted_yaw_torque_nm_ = 0\.0f;\s*last_submitted_yaw_torque_valid_ = false;\s*\}' \
   'submitted-torque ledger invalidation without controller rearm'
 need_multiline \
-  'void InvalidateYawControllerState\(\) \{\s*ClearSubmittedYawTorqueLedger\(\);\s*yaw_lqr_eso_reset_pending_ = true;\s*\}' \
-  'controller invalidation explicitly rearms after clearing its ledger'
-need_multiline \
-  'void ControlYawMotor\(const Motor::MotorCmd& command\) \{\s*if \(motor_yaw_feedback_\.state == 0\) \{\s*motor_yaw_->Enable\(\);\s*ClearSubmittedYawTorqueLedger\(\);\s*\} else if \(motor_yaw_feedback_\.state != 1\) \{\s*motor_yaw_->ClearError\(\);\s*ClearSubmittedYawTorqueLedger\(\);\s*\} else \{\s*if \(ConsumePendingRelaxRequest\(\)\) \{\s*return;\s*\}\s*motor_yaw_->Control\(command\);\s*last_submitted_yaw_torque_nm_ = command\.torque;\s*last_submitted_yaw_torque_valid_ = true;\s*yaw_lqr_eso_\.CommitAppliedTorque\(command\.torque\);\s*\}\s*\}' \
+  'void ControlYawMotor\(const Motor::MotorCmd& command\) \{\s*if \(motor_yaw_feedback_\.state == 0\) \{\s*motor_yaw_->Enable\(\);\s*ClearSubmittedYawTorqueLedger\(\);\s*\} else if \(motor_yaw_feedback_\.state != 1\) \{\s*motor_yaw_->ClearError\(\);\s*ClearSubmittedYawTorqueLedger\(\);\s*\} else \{\s*motor_yaw_->Control\(command\);\s*last_submitted_yaw_torque_nm_ = command\.torque;\s*last_submitted_yaw_torque_valid_ = true;\s*yaw_lqr_eso_\.CommitAppliedTorque\(command\.torque\);\s*\}\s*\}' \
   'Enable and ClearError discard only the candidate ledger while recovered Control commits the applied torque'
 
 forbid_in_lines \
@@ -186,10 +171,8 @@ forbid_in_lines \
   '/\*\*' \
   'yaw_lqr_eso_reset_pending_|InvalidateYawControllerState' \
   'motor-not-ready submission must not rearm the controller after a valid AI calculation'
-need_method_tail \
-  '\bvoid\s+SetMode\s*\(\s*GimbalEvent\s+gimbal_event\s*\)' \
-  'InvalidateYawControllerState\(\);' \
-  'Gimbal mode transitions invalidate the AI Yaw controller state'
+forbid_file "${HEADER}" 'ResetLegacyYawToCurrent|InvalidateYawControllerState' \
+  'controller transition reset helpers'
 
 need_count 'motor_yaw_->Control\(' 1 'one Yaw submission site'
 need 'void SolveLegacyYaw\(\)' 'legacy solve helper'

@@ -83,8 +83,6 @@ constructor_args:
       lqi_enable: false
       torque_bias_enable: false
       torque_slew_enable: true
-  - euler_topic_name: ahrs_euler
-  - gyro_topic_name: bmi088_gyro
 template_args: []
 required_hardware: []
 depends:
@@ -95,7 +93,6 @@ depends:
 === END MANIFEST === */
 // clang-format on
 
-#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -118,9 +115,6 @@ depends:
 
 static constexpr float GIMBAL_MAX_SPEED =
     static_cast<float>(LibXR::TWO_PI) * 2.0f;
-static constexpr float CONTROL_DT_MIN = 0.0005f;
-static constexpr float CONTROL_DT_MAX = 0.02f;
-static constexpr uint64_t IMU_TIMEOUT_US = 50000U;
 static constexpr uint32_t CHASSIS_MODE_ROTOR = 2U;
 enum class GimbalEvent : uint8_t {
   SET_MODE_RELAX,
@@ -128,11 +122,6 @@ enum class GimbalEvent : uint8_t {
   SET_MODE_AUTOPATROL,
   SET_MODE_LOW_SENSITIVITY
 };
-static constexpr uint32_t MODE_REQUEST_NONE = 0U;
-static constexpr uint32_t MODE_REQUEST_RELAX_BIT = 1U << 31U;
-static_assert(std::atomic<uint32_t>::is_always_lock_free,
-              "Gimbal mode requests require a lock-free 32-bit atomic");
-
 class Gimbal : public LibXR::Application {
  public:
   /**
@@ -162,8 +151,6 @@ class Gimbal : public LibXR::Application {
    *
    * 是否启用小陀螺模式Yaw轴角速度前馈
    * @param yaw_lqr_eso AI Yaw LQR/ESO参数
-   * @param euler_topic_name 欧拉角数据主题名称
-   * @param gyro_topic_name 陀螺仪数据主题名称
    */
   Gimbal(
       LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app, CMD& cmd,
@@ -176,9 +163,7 @@ class Gimbal : public LibXR::Application {
       float yaw_zero, float patrol_range, float patrol_omega, bool reverse_flag,
       Referee* referee,
       LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,
-      bool rotor_ff_enabled = false, YawLqrEso::Config yaw_lqr_eso = {},
-      const char* euler_topic_name = "ahrs_euler",
-      const char* gyro_topic_name = "bmi088_gyro")
+      bool rotor_ff_enabled = false, YawLqrEso::Config yaw_lqr_eso = {})
       : cmd_(cmd),
         pid_yaw_angle_(pid_yaw_angle),
         pid_yaw_omega_(pid_yaw_omega),
@@ -201,8 +186,6 @@ class Gimbal : public LibXR::Application {
         referee_(referee),
         rotor_ff_enabled_(rotor_ff_enabled),
         yaw_lqr_eso_config_(yaw_lqr_eso),
-        euler_topic_name_(euler_topic_name),
-        gyro_topic_name_(gyro_topic_name),
         chassis_gyro_z_topic_(LibXR::Topic::FindOrCreate<float>(
             "chassis_gyro_z", nullptr, false)),
         dualboard_chassis_mode_topic_(LibXR::Topic::FindOrCreate<uint32_t>(
@@ -216,7 +199,7 @@ class Gimbal : public LibXR::Application {
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
           UNUSED(event_id);
-          gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);
+          gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
         },
         this);
 
@@ -224,14 +207,14 @@ class Gimbal : public LibXR::Application {
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
           UNUSED(event_id);
-          gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);
+          gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
         },
         this);
 
     auto callback = LibXR::Callback<uint32_t>::Create(
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
-          gimbal->RequestMode(static_cast<GimbalEvent>(event_id));
+          gimbal->SetMode(static_cast<GimbalEvent>(event_id));
         },
         this);
 
@@ -255,9 +238,9 @@ class Gimbal : public LibXR::Application {
   static void ThreadFunc(Gimbal* gimbal) {
     LibXR::Topic::ASyncSubscriber<CMD::GimbalCMD> cmd_suber("gimbal_cmd");
     LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>> euler_suber(
-        gimbal->euler_topic_name_);
+        "gimbal_euler");
     LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>> gyro_suber(
-        gimbal->gyro_topic_name_);
+        "gimbal_gyro");
     LibXR::Topic::ASyncSubscriber<float> chassis_gyro_z_suber(
         LibXR::Topic(gimbal->chassis_gyro_z_topic_));
     LibXR::Topic::ASyncSubscriber<uint32_t> dualboard_chassis_mode_suber(
@@ -271,7 +254,6 @@ class Gimbal : public LibXR::Application {
     gimbal->last_online_time_ = LibXR::Timebase::GetMicroseconds();
 
     while (true) {
-      gimbal->ConsumePendingModeRequest();
       if (cmd_suber.Available()) {
         gimbal->cmd_data_ = cmd_suber.GetData();
         cmd_suber.StartWaiting();
@@ -279,15 +261,11 @@ class Gimbal : public LibXR::Application {
       if (euler_suber.Available()) {
         gimbal->euler_ = euler_suber.GetData();
         gimbal->euler_.Pitch() *= -1.0f;
-        gimbal->last_euler_update_ = euler_suber.GetTimestamp();
-        gimbal->euler_received_ = true;
         euler_suber.StartWaiting();
       }
       if (gyro_suber.Available()) {
         gimbal->gyro_data_ = gyro_suber.GetData();
         gimbal->gyro_data_.y() *= -1.0f;
-        gimbal->last_gyro_update_ = gyro_suber.GetTimestamp();
-        gimbal->gyro_received_ = true;
         gyro_suber.StartWaiting();
       }
       if (chassis_gyro_z_suber.Available()) {
@@ -321,20 +299,6 @@ class Gimbal : public LibXR::Application {
     const auto NOW = LibXR::Timebase::GetMicroseconds();
     this->dt_ = (NOW - this->last_online_time_).ToSecondf();
     this->last_online_time_ = NOW;
-    dt_valid_ =
-        std::isfinite(dt_) && dt_ > CONTROL_DT_MIN && dt_ <= CONTROL_DT_MAX;
-
-    const bool EULER_FINITE = std::isfinite(euler_.Roll()) &&
-                              std::isfinite(euler_.Pitch()) &&
-                              std::isfinite(euler_.Yaw());
-    const bool GYRO_FINITE = std::isfinite(gyro_data_.x()) &&
-                             std::isfinite(gyro_data_.y()) &&
-                             std::isfinite(gyro_data_.z());
-    imu_online_ =
-        euler_received_ && gyro_received_ && EULER_FINITE && GYRO_FINITE &&
-        (NOW - last_euler_update_).ToMicrosecond() <= IMU_TIMEOUT_US &&
-        (NOW - last_gyro_update_).ToMicrosecond() <= IMU_TIMEOUT_US;
-
     abs_angle_pit_ = motor_pit_feedback_.abs_angle - pit_zero_;
     abs_angle_yaw_ = motor_yaw_feedback_.abs_angle - yaw_zero_;
 
@@ -353,16 +317,7 @@ class Gimbal : public LibXR::Application {
     const bool AI_YAW_ACTIVE =
         ctrl_mode_snapshot_ == CMD::Mode::CMD_AUTO_CTRL &&
         ai_gimbal_status_snapshot_;
-    if (AI_YAW_ACTIVE && !ai_yaw_active_) {
-      yaw_lqr_eso_reset_pending_ = true;
-    } else if (!AI_YAW_ACTIVE && ai_yaw_active_) {
-      ResetLegacyYawToCurrent();
-    }
     ai_yaw_active_ = AI_YAW_ACTIVE;
-
-    if (!dt_valid_) {
-      return;
-    }
 
     if (ctrl_mode_snapshot_ == CMD::Mode::CMD_OP_CTRL) {
       if (current_mode_ == GimbalEvent::SET_MODE_LOW_SENSITIVITY) {
@@ -426,11 +381,7 @@ class Gimbal : public LibXR::Application {
    * @brief 云台控制计算与输出
    */
   void Control() {
-    if (ConsumePendingModeRequest()) {
-      return;
-    }
-
-    if (!motor_feedback_online_ || !imu_online_) {
+    if (!motor_feedback_online_) {
       // 反馈离线时立即切松弛，避免继续使用旧反馈闭环输出。
       SetMode(GimbalEvent::SET_MODE_RELAX);
     }
@@ -444,7 +395,6 @@ class Gimbal : public LibXR::Application {
       last_pit_angle_loop_omega_ = 0.0f;
       last_yaw_angle_loop_omega_ = 0.0f;
       motor_yaw_->Relax();
-      InvalidateYawControllerState();
       motor_pit_->Relax();
       return;
     }
@@ -452,33 +402,9 @@ class Gimbal : public LibXR::Application {
     /*仅用于调试极性()*/
     this->torque_ = -this->pit_lc_ * sinf(euler_.Pitch() + this->pit_theta_);
 
-    if (dt_valid_) {
-      PitchLimit(target_pit_cmd_, euler_.Pitch(), motor_pit_feedback_.abs_angle,
-                 pit_max_angle_, pit_min_angle_, reverse_flag_);
-      Solve();
-    } else {
-      pid_pit_omega_.SetFeedForward(0.0f);
-      pid_yaw_omega_.SetFeedForward(0.0f);
-      last_pit_angle_loop_omega_ = 0.0f;
-      last_yaw_angle_loop_omega_ = 0.0f;
-      yaw_output_ = 0.0f;
-      if (ai_yaw_active_) {
-        yaw_lqr_eso_reset_pending_ = true;
-      }
-    }
-
-    if (!std::isfinite(yaw_output_)) {
-      if (ai_yaw_active_) {
-        yaw_output_ = 0.0f;
-        yaw_lqr_eso_reset_pending_ = true;
-      } else {
-        ResetLegacyYawToCurrent();
-        SolveLegacyYaw();
-        if (!std::isfinite(yaw_output_)) {
-          yaw_output_ = 0.0f;
-        }
-      }
-    }
+    PitchLimit(target_pit_cmd_, euler_.Pitch(), motor_pit_feedback_.abs_angle,
+               pit_max_angle_, pit_min_angle_, reverse_flag_);
+    Solve();
 
     auto yaw_motor_cmd = Motor::MotorCmd(
         {.mode = Motor::ControlMode::MODE_TORQUE, .torque = yaw_output_});
@@ -496,13 +422,7 @@ class Gimbal : public LibXR::Application {
       }
     };
 
-    if (ConsumePendingRelaxRequest()) {
-      return;
-    }
     motor_control(motor_pit_, motor_pit_feedback_, pit_motor_cmd);
-    if (ConsumePendingRelaxRequest()) {
-      return;
-    }
     ControlYawMotor(yaw_motor_cmd);
   }
 
@@ -523,10 +443,6 @@ class Gimbal : public LibXR::Application {
   Motor::Feedback motor_yaw_feedback_;
   Motor::Feedback motor_pit_feedback_;
   bool motor_feedback_online_ = true;
-  bool dt_valid_ = false;
-  bool imu_online_ = false;
-  bool euler_received_ = false;
-  bool gyro_received_ = false;
 
   CMD::GimbalCMD cmd_data_;
   Eigen::Matrix<float, 3, 1> gyro_data_;
@@ -567,8 +483,6 @@ class Gimbal : public LibXR::Application {
   LibXR::MillisecondTimestamp patrol_start_time = 0.0f;
   float dt_ = 0.0f;
   LibXR::MicrosecondTimestamp last_online_time_;
-  LibXR::MicrosecondTimestamp last_euler_update_{};
-  LibXR::MicrosecondTimestamp last_gyro_update_{};
   Referee* referee_;
   bool rotor_ff_enabled_ = false;
   YawLqrEso::Config yaw_lqr_eso_config_{};
@@ -583,11 +497,8 @@ class Gimbal : public LibXR::Application {
   bool ai_gimbal_status_snapshot_ = false;
   float chassis_gyro_z_ = 0.0f;
   uint32_t dualboard_chassis_mode_ = 0U;
-  const char* euler_topic_name_;
-  const char* gyro_topic_name_;
   LibXR::Topic::TopicHandle chassis_gyro_z_topic_;
   LibXR::Topic::TopicHandle dualboard_chassis_mode_topic_;
-  std::atomic<uint32_t> pending_mode_request_{MODE_REQUEST_NONE};
   LibXR::Thread thread_;
 
   /*----------工具函数--------------------------------*/
@@ -621,78 +532,9 @@ class Gimbal : public LibXR::Application {
     target_pit = std::clamp(target_pit, lower_bound, upper_bound);
   }
 
-  void ResetLegacyYawToCurrent() {
-    target_yaw_cmd_ = euler_.Yaw();
-    target_yaw_dot_ = 0.0f;
-    target_yaw_ddot_ = 0.0f;
-    last_yaw_angle_loop_omega_ = 0.0f;
-    pid_yaw_omega_.SetFeedForward(0.0f);
-    pid_yaw_angle_.Reset();
-    pid_yaw_omega_.Reset();
-  }
-
   void ClearSubmittedYawTorqueLedger() {
     last_submitted_yaw_torque_nm_ = 0.0f;
     last_submitted_yaw_torque_valid_ = false;
-  }
-
-  void InvalidateYawControllerState() {
-    ClearSubmittedYawTorqueLedger();
-    yaw_lqr_eso_reset_pending_ = true;
-  }
-
-  static uint32_t EncodeModeRequest(GimbalEvent gimbal_event) {
-    return static_cast<uint32_t>(gimbal_event) + 1U;
-  }
-
-  void RequestMode(GimbalEvent gimbal_event) {
-    if (gimbal_event == GimbalEvent::SET_MODE_RELAX) {
-      pending_mode_request_.fetch_or(MODE_REQUEST_RELAX_BIT,
-                                     std::memory_order_release);
-      return;
-    }
-
-    const uint32_t REQUEST = EncodeModeRequest(gimbal_event);
-    uint32_t pending = pending_mode_request_.load(std::memory_order_relaxed);
-    while (true) {
-      if ((pending & MODE_REQUEST_RELAX_BIT) != 0U) {
-        return;
-      }
-      if (pending_mode_request_.compare_exchange_weak(
-              pending, REQUEST, std::memory_order_release,
-              std::memory_order_relaxed)) {
-        return;
-      }
-    }
-  }
-
-  bool ConsumePendingModeRequest() {
-    const uint32_t REQUEST = pending_mode_request_.exchange(
-        MODE_REQUEST_NONE, std::memory_order_acquire);
-    if (REQUEST == MODE_REQUEST_NONE) {
-      return false;
-    }
-    if ((REQUEST & MODE_REQUEST_RELAX_BIT) != 0U) {
-      SetMode(GimbalEvent::SET_MODE_RELAX);
-    } else {
-      SetMode(static_cast<GimbalEvent>(REQUEST - 1U));
-    }
-    return true;
-  }
-
-  bool ConsumePendingRelaxRequest() {
-    uint32_t pending = pending_mode_request_.load(std::memory_order_acquire);
-    while (true) {
-      if ((pending & MODE_REQUEST_RELAX_BIT) == 0U) {
-        return false;
-      }
-      if (pending_mode_request_.compare_exchange_weak(
-              pending, MODE_REQUEST_NONE, std::memory_order_acq_rel,
-              std::memory_order_acquire)) {
-        SetMode(GimbalEvent::SET_MODE_RELAX);
-        return true;
-      }
-    }
   }
 
   void ControlYawMotor(const Motor::MotorCmd& command) {
@@ -703,9 +545,6 @@ class Gimbal : public LibXR::Application {
       motor_yaw_->ClearError();
       ClearSubmittedYawTorqueLedger();
     } else {
-      if (ConsumePendingRelaxRequest()) {
-        return;
-      }
       motor_yaw_->Control(command);
       last_submitted_yaw_torque_nm_ = command.torque;
       last_submitted_yaw_torque_valid_ = true;
@@ -774,7 +613,7 @@ class Gimbal : public LibXR::Application {
         {.theta_rad = euler_.Yaw(),
          .omega_rad_s = gyro_data_.z(),
          .tau_meas_nm = motor_yaw_feedback_.torque,
-         .valid = motor_feedback_online_ && imu_online_,
+         .valid = motor_feedback_online_,
          .torque_measurement_valid = std::isfinite(motor_yaw_feedback_.torque)},
         dt_);
     if (!yaw_lqr_eso_output_.valid ||
@@ -869,6 +708,5 @@ class Gimbal : public LibXR::Application {
       default:
         break;
     }
-    InvalidateYawControllerState();
   }
 };
