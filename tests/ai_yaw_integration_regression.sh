@@ -28,8 +28,11 @@ import sys
 
 header, signature, required_tail, description = sys.argv[1:]
 source = pathlib.Path(header).read_text()
+source = re.sub(r"\\\r?\n", "", source)
 non_code = re.compile(
-    r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+    r'(?:u8|u|U|L)?R"(?P<raw_delimiter>[^ ()\\\t\r\n]{0,16})\(.*?\)'
+    r'(?P=raw_delimiter)"|//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|'
+    r"'(?:\\.|[^'\\])*'",
     re.S,
 )
 code = non_code.sub(
@@ -128,6 +131,9 @@ forbid_file "${HEADER}" 'ai_yaw_lqr_eso_enable' \
   'cross-platform AI Yaw master switch'
 forbid_file "${HEADER}" 'IsGm6020LimitValid|IsRotorCompatibleAiConfig' \
   'motor-specific route selection gates'
+forbid_file "${HEADER}" \
+  '^[[:space:]]*#[[:space:]]*define[[:space:]]+InvalidateYawControllerState(?:[[:space:]]|\(|$)' \
+  'macro override of AI Yaw controller invalidation'
 
 need 'bool ai_yaw_active_ = false' 'direct AI active state'
 need 'bool yaw_lqr_eso_reset_pending_ = true' 'controller reset lifecycle state'
