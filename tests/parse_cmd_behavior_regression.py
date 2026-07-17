@@ -165,6 +165,17 @@ def require(description, pattern, source):
         raise CharacterizationError(f"missing: {description}")
 
 
+def require_target_write_sequence(description, source, axis, expected):
+    writes = [
+        (match.group(1), match.group(2))
+        for match in re.finditer(
+            rf"target_{axis}_(cmd|dot|ddot)_\s*(\+=|-=|=)\s*[^;]+;", source
+        )
+    ]
+    if writes != expected:
+        raise CharacterizationError(f"missing: {description}")
+
+
 PITCH_RATE_TARGETS = (
     r"target_pit_cmd_ \+= PIT_OPERATOR_RATE \* dt_; "
     r"target_pit_dot_ = PIT_OPERATOR_RATE; target_pit_ddot_ = 0\.0f;"
@@ -308,6 +319,44 @@ def require_current_layout(body):
         + r" target_yaw_ddot_ = 0\.0f;",
         automatic_yaw.body,
     )
+    require_target_write_sequence(
+        "exact current Pitch target writes",
+        body,
+        "pit",
+        [
+            ("cmd", "+="),
+            ("dot", "="),
+            ("ddot", "="),
+            ("cmd", "+="),
+            ("dot", "="),
+            ("ddot", "="),
+            ("cmd", "="),
+            ("dot", "="),
+            ("ddot", "="),
+            ("cmd", "-="),
+            ("dot", "="),
+            ("ddot", "="),
+            ("cmd", "+="),
+            ("dot", "="),
+            ("ddot", "="),
+        ],
+    )
+    require_target_write_sequence(
+        "exact current Yaw target writes",
+        body,
+        "yaw",
+        [
+            ("cmd", "+="),
+            ("dot", "="),
+            ("ddot", "="),
+            ("cmd", "+="),
+            ("dot", "="),
+            ("ddot", "="),
+            ("cmd", "+="),
+            ("dot", "="),
+            ("ddot", "="),
+        ],
+    )
 
 
 def require_phased_layout(body):
@@ -388,10 +437,38 @@ def require_phased_layout(body):
         + YAW_RATE_TARGETS,
         automatic_yaw.body,
     )
-    require(
-        "shared Yaw acceleration reset",
-        r"target_yaw_ddot_ = 0\.0f;",
-        yaw_tail[automatic_yaw.end :],
+    yaw_suffix = compact(yaw_tail[automatic_yaw.end :])
+    if not yaw_suffix.startswith("target_yaw_ddot_ = 0.0f;"):
+        raise CharacterizationError("missing: unconditional shared Yaw acceleration reset")
+    require_target_write_sequence(
+        "exact phased Pitch target writes",
+        body,
+        "pit",
+        [
+            ("cmd", "="),
+            ("dot", "="),
+            ("ddot", "="),
+            ("cmd", "-="),
+            ("dot", "="),
+            ("ddot", "="),
+            ("cmd", "+="),
+            ("dot", "="),
+            ("ddot", "="),
+        ],
+    )
+    require_target_write_sequence(
+        "exact phased Yaw target writes",
+        body,
+        "yaw",
+        [
+            ("cmd", "+="),
+            ("dot", "="),
+            ("cmd", "+="),
+            ("dot", "="),
+            ("cmd", "+="),
+            ("dot", "="),
+            ("ddot", "="),
+        ],
     )
 
 
@@ -429,15 +506,27 @@ def replace_last(source, old, new):
 def reorder_yaw_before_pitch(source):
     parse_cmd = extract_parse_cmd(source)
     body = parse_cmd.body
-    pitch = find_if(body, r"CTRL_MODE == CMD::Mode::CMD_OP_CTRL", "target_pit_cmd_")
-    yaw = find_if(body, r"!ai_yaw_active_", "target_yaw_cmd_")
+    if "const bool OPERATOR_CONTROL" in body:
+        pitch = find_if(body, r"AI_YAW_ACTIVE", "target_pit_cmd_")
+        yaw = find_if(body, r"AI_YAW_ACTIVE", "return;")
+        reset = "target_yaw_ddot_ = 0.0f;"
+        reset_start = body.find(reset, yaw.end)
+        if reset_start < 0:
+            raise CharacterizationError("negative order mutation cannot locate Yaw reset")
+        yaw_end = reset_start + len(reset)
+    else:
+        pitch = find_if(
+            body, r"CTRL_MODE == CMD::Mode::CMD_OP_CTRL", "target_pit_cmd_"
+        )
+        yaw = find_if(body, r"!ai_yaw_active_", "target_yaw_cmd_")
+        yaw_end = yaw.end
     if pitch.start >= yaw.start:
         raise CharacterizationError("negative order mutation cannot locate stages")
     reordered = (
         body[: pitch.start]
-        + body[yaw.start : yaw.end]
+        + body[yaw.start:yaw_end]
         + body[pitch.start : yaw.start]
-        + body[yaw.end :]
+        + body[yaw_end:]
     )
     return source[: parse_cmd.body_start] + reordered + source[parse_cmd.body_end :]
 
@@ -464,7 +553,27 @@ def leak_yaw_reset_outside_guard(source):
     return source[: parse_cmd.body_start] + leaked + source[parse_cmd.body_end :]
 
 
-def negative_variants(source):
+def move_phased_yaw_reset_before_guard(source):
+    parse_cmd = extract_parse_cmd(source)
+    body = parse_cmd.body
+    guard = find_if(body, r"AI_YAW_ACTIVE", "return;")
+    statement = "target_yaw_ddot_ = 0.0f;"
+    statement_start = body.find(statement, guard.end)
+    if statement_start < 0:
+        raise CharacterizationError("negative phased guard mutation cannot locate reset")
+    without_statement = (
+        body[:statement_start] + body[statement_start + len(statement) :]
+    )
+    leaked = (
+        without_statement[: guard.start]
+        + statement
+        + "\n    "
+        + without_statement[guard.start :]
+    )
+    return source[: parse_cmd.body_start] + leaked + source[parse_cmd.body_end :]
+
+
+def current_negative_variants(source):
     return [
         (
             "operator Pitch low sensitivity",
@@ -536,6 +645,16 @@ def negative_variants(source):
             "missing: operator Yaw low and normal sensitivity behavior",
         ),
         (
+            "extra operator Yaw target write",
+            replace_first(
+                source,
+                "target_yaw_ddot_ = 0.0f;",
+                "target_yaw_ddot_ = 0.0f;\n"
+                "        target_yaw_cmd_ += 99.0f;",
+            ),
+            "missing: exact current Yaw target writes",
+        ),
+        (
             "patrol Yaw",
             replace_once(source, "target_yaw_dot_ = 1.0f;", "target_yaw_dot_ = 2.0f;"),
             "missing: patrol Yaw behavior",
@@ -564,6 +683,131 @@ def negative_variants(source):
             "missing: Pitch-before-Yaw processing order",
         ),
     ]
+
+
+def phased_negative_variants(source):
+    return [
+        (
+            "operator Pitch low sensitivity",
+            replace_once(
+                source,
+                "OPERATOR_CONTROL && LOW_SENSITIVITY ? 0.1f : 1.0f",
+                "OPERATOR_CONTROL && LOW_SENSITIVITY ? 0.2f : 1.0f",
+            ),
+            "missing: operator and non-AI automatic Pitch behavior",
+        ),
+        (
+            "operator Pitch normal formula",
+            replace_once(
+                source,
+                "cmd_data_.pit * GIMBAL_MAX_SPEED * PITCH_SENSITIVITY",
+                "cmd_data_.pit * PITCH_SENSITIVITY",
+            ),
+            "missing: operator and non-AI automatic Pitch behavior",
+        ),
+        (
+            "patrol Pitch sign",
+            replace_once(source, "target_pit_cmd_ -=", "target_pit_cmd_ +="),
+            "missing: patrol Pitch behavior",
+        ),
+        (
+            "AI Pitch branch",
+            replace_first(source, "if (AI_YAW_ACTIVE) {", "if (!AI_YAW_ACTIVE) {"),
+            "missing: AI absolute Pitch behavior",
+        ),
+        (
+            "non-AI automatic Pitch usage",
+            replace_once(
+                source,
+                "target_pit_dot_ = PIT_OPERATOR_RATE;",
+                "target_pit_dot_ = -PIT_OPERATOR_RATE;",
+            ),
+            "missing: operator and non-AI automatic Pitch behavior",
+        ),
+        (
+            "AI Yaw bypass",
+            replace_last(source, "if (AI_YAW_ACTIVE) {", "if (!AI_YAW_ACTIVE) {"),
+            "missing: AI Yaw bypass",
+        ),
+        (
+            "AI Yaw complete guard coverage",
+            move_phased_yaw_reset_before_guard(source),
+            "missing: AI Yaw bypass",
+        ),
+        (
+            "operator Yaw low sensitivity",
+            replace_last(
+                source,
+                "LOW_SENSITIVITY ? 0.1f : 1.0f",
+                "LOW_SENSITIVITY ? 0.2f : 1.0f",
+            ),
+            "missing: operator Yaw low and normal sensitivity behavior",
+        ),
+        (
+            "operator Yaw usage",
+            replace_first(
+                source,
+                "target_yaw_dot_ = YAW_OPERATOR_RATE;",
+                "target_yaw_dot_ = -YAW_OPERATOR_RATE;",
+            ),
+            "missing: operator Yaw low and normal sensitivity behavior",
+        ),
+        (
+            "extra operator Yaw target write",
+            replace_first(
+                source,
+                "target_yaw_dot_ = YAW_OPERATOR_RATE;",
+                "target_yaw_dot_ = YAW_OPERATOR_RATE;\n"
+                "      target_yaw_cmd_ += 99.0f;",
+            ),
+            "missing: exact phased Yaw target writes",
+        ),
+        (
+            "patrol Yaw",
+            replace_once(source, "target_yaw_dot_ = 1.0f;", "target_yaw_dot_ = 2.0f;"),
+            "missing: patrol Yaw behavior",
+        ),
+        (
+            "automatic Yaw sign",
+            replace_once(
+                source,
+                "-cmd_data_.yaw * GIMBAL_MAX_SPEED",
+                "cmd_data_.yaw * GIMBAL_MAX_SPEED",
+            ),
+            "missing: non-AI automatic Yaw behavior",
+        ),
+        (
+            "automatic Yaw usage",
+            replace_last(
+                source,
+                "target_yaw_dot_ = YAW_OPERATOR_RATE;",
+                "target_yaw_dot_ = -YAW_OPERATOR_RATE;",
+            ),
+            "missing: non-AI automatic Yaw behavior",
+        ),
+        (
+            "shared Yaw acceleration reset",
+            replace_once(
+                source,
+                "target_yaw_ddot_ = 0.0f;\n  }",
+                "if (OPERATOR_CONTROL) {\n"
+                "      target_yaw_ddot_ = 0.0f;\n"
+                "    }\n  }",
+            ),
+            "missing: unconditional shared Yaw acceleration reset",
+        ),
+        (
+            "Pitch/Yaw order",
+            reorder_yaw_before_pitch(source),
+            "missing: Pitch-before-Yaw processing order",
+        ),
+    ]
+
+
+def negative_variants(source):
+    if "const bool OPERATOR_CONTROL" in extract_parse_cmd(source).body:
+        return phased_negative_variants(source)
+    return current_negative_variants(source)
 
 
 def run_negative_checks(source):
