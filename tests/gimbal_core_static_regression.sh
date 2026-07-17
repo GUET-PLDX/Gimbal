@@ -38,14 +38,9 @@ forbid() {
   fi
 }
 
-need 'CONTROL_DT_MIN = 0\.0005f' 'minimum dt guard'
-need 'CONTROL_DT_MAX = 0\.02f' 'maximum dt guard'
-need 'dt_ > CONTROL_DT_MIN && dt_ <= CONTROL_DT_MAX' 'strict dt validity interval'
-need 'IMU_TIMEOUT_US = 50000U' 'single IMU timeout'
-need 'euler_received_' 'Euler received state'
-need 'gyro_received_' 'gyro received state'
-need 'last_euler_update_' 'Euler timestamp'
-need 'last_gyro_update_' 'gyro timestamp'
+forbid 'CONTROL_DT_(MIN|MAX)|dt_valid_' 'control period validity guard'
+forbid 'IMU_TIMEOUT_US|imu_online_|euler_received_|gyro_received_' \
+  'IMU freshness guard'
 need 'last_pit_angle_loop_omega_' 'Pitch angle-loop history'
 need 'last_yaw_angle_loop_omega_' 'Yaw angle-loop history'
 need 'pid_pit_omega_\.SetFeedForward' 'Pitch LibXR feedforward'
@@ -54,7 +49,6 @@ need 'pit_output_' 'real Pitch output member'
 need 'yaw_output_' 'real Yaw output member'
 need '-this->pit_lc_ \* sinf\(euler_\.Pitch\(\) \+ this->pit_theta_\)' 'unchanged Pitch gravity formula'
 forbid 'target_.*omega.*last_.*omega' 'derivative of total target omega'
-forbid 'dt_ >= CONTROL_DT_MIN' 'inclusive lower dt guard'
 forbid 'SleepUntil' 'SleepUntil scheduling'
 forbid 'Telemetry' 'Telemetry structure'
 
@@ -83,8 +77,15 @@ need_multiline \
   'thread_priority: LibXR::Thread::Priority::MEDIUM\r?\n  - rotor_ff_enabled: false' \
   'rotor feedforward manifest option appended after thread priority'
 need_multiline \
-  'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false\)' \
-  'rotor feedforward constructor option appended after thread priority'
+  'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false,\s*YawLqrEso::Config yaw_lqr_eso = \{\}\)' \
+  'AI Yaw config appended after thread priority'
+need_multiline \
+  'ASyncSubscriber<LibXR::EulerAngle<float>> euler_suber\s*\(\s*"gimbal_euler"\s*\)' \
+  'Euler subscriber uses fixed Gimbal Topic name'
+need_multiline \
+  'ASyncSubscriber<Eigen::Matrix<float, 3, 1>> gyro_suber\s*\(\s*"gimbal_gyro"\s*\)' \
+  'gyro subscriber uses fixed Gimbal Topic name'
+forbid 'euler_topic_name|gyro_topic_name' 'configurable Gimbal IMU Topic names'
 need 'bool rotor_ff_enabled_ = false' 'default-disabled feature flag member'
 need 'float chassis_gyro_z_ = 0\.0f' 'zero-initialized chassis gyro member'
 need 'uint32_t dualboard_chassis_mode_ = 0U' \
