@@ -18,6 +18,48 @@ need_multiline() {
     { echo "missing: $2" >&2; exit 1; }
 }
 
+need_method_tail() {
+  local signature="$1" required_tail="$2" description="$3"
+  python3 - "${HEADER}" "${signature}" "${required_tail}" \
+    "${description}" <<'PY'
+import pathlib
+import re
+import sys
+
+header, signature, required_tail, description = sys.argv[1:]
+source = pathlib.Path(header).read_text()
+non_code = re.compile(
+    r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+    re.S,
+)
+code = non_code.sub(
+    lambda match: "".join("\n" if char == "\n" else " " for char in match.group()),
+    source,
+)
+matches = list(re.finditer(signature + r"\s*\{", code))
+if len(matches) != 1:
+    raise SystemExit(
+        f"expected one method for {description}, found {len(matches)}"
+    )
+
+opening = matches[0].end() - 1
+depth = 0
+for index in range(opening, len(code)):
+    if code[index] == "{":
+        depth += 1
+    elif code[index] == "}":
+        depth -= 1
+        if depth == 0:
+            body = code[opening + 1 : index]
+            break
+else:
+    raise SystemExit(f"unbalanced method for {description}")
+
+if re.search(r"(?:" + required_tail + r")\s*\Z", body, re.S) is None:
+    raise SystemExit(f"missing method tail: {description}")
+PY
+}
+
 need_before() {
   local first second
   first="$(rg -n -m1 -- "$1" "${HEADER}" | cut -d: -f1 || true)"
@@ -135,10 +177,9 @@ forbid_in_lines \
   '/\*\*' \
   'yaw_lqr_eso_reset_pending_|InvalidateYawControllerState' \
   'motor-not-ready submission must not rearm the controller after a valid AI calculation'
-need_in_lines \
-  'void SetMode\(GimbalEvent gimbal_event\)' \
-  '^};' \
-  'InvalidateYawControllerState\(\);\s*\}' \
+need_method_tail \
+  '\bvoid\s+SetMode\s*\(\s*GimbalEvent\s+gimbal_event\s*\)' \
+  'InvalidateYawControllerState\(\);' \
   'Gimbal mode transitions invalidate the AI Yaw controller state'
 
 need_count 'motor_yaw_->Control\(' 1 'one Yaw submission site'
