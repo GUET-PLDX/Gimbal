@@ -139,20 +139,20 @@ forbid_file "${HEADER}" 'IsGm6020LimitValid|IsRotorCompatibleAiConfig' \
 need 'bool ai_yaw_active_ = false' 'direct AI active state'
 need 'bool yaw_lqr_eso_reset_pending_ = true' 'controller reset lifecycle state'
 need_multiline \
-  'const bool AI_YAW_ACTIVE =\s*ctrl_mode_snapshot_ == CMD::Mode::CMD_AUTO_CTRL &&\s*ai_gimbal_status_snapshot_;' \
-  'exact CMD-based AI selection'
+  'const auto CTRL_MODE = cmd_\.GetCtrlMode\(\);\s*const bool AI_GIMBAL_ACTIVE = cmd_\.GetAIGimbalStatus\(\);\s*const bool AI_YAW_ACTIVE =\s*CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && AI_GIMBAL_ACTIVE;' \
+  'local CMD-based AI selection'
 need 'ai_yaw_active_ = AI_YAW_ACTIVE' 'direct AI active-state assignment'
 need_multiline \
   'if \(yaw_lqr_eso_reset_pending_\) \{.*yaw_lqr_eso_\.Reset\(' \
   'reset before AI calculation'
 need_multiline \
-  'yaw_lqr_eso_output_ = yaw_lqr_eso_\.Calculate\(.*cmd_data_\.yaw.*cmd_data_\.yaw_dot.*cmd_data_\.yaw_ddot' \
+  'const auto YAW_LQR_ESO_OUTPUT = yaw_lqr_eso_\.Calculate\(.*cmd_data_\.yaw.*cmd_data_\.yaw_dot.*cmd_data_\.yaw_ddot' \
   'direct AI reference construction'
 need_multiline \
-  'if \(!yaw_lqr_eso_output_\.valid.*\) \{\s*yaw_output_ = 0\.0f;\s*yaw_lqr_eso_reset_pending_ = true;\s*return;\s*\}' \
+  'if \(!YAW_LQR_ESO_OUTPUT\.valid.*\) \{\s*yaw_output_ = 0\.0f;\s*yaw_lqr_eso_reset_pending_ = true;\s*return;\s*\}' \
   'invalid AI output becomes zero and requests reset'
 need_multiline \
-  'yaw_lqr_eso_reset_pending_ = false;\s*yaw_output_ = yaw_lqr_eso_output_\.tau_cmd_nm;' \
+  'yaw_lqr_eso_reset_pending_ = false;\s*yaw_output_ = YAW_LQR_ESO_OUTPUT\.tau_cmd_nm;' \
   'valid calculation clears reset before motor submission'
 need_multiline \
   'if \(ai_yaw_active_\) \{\s*SolveAiYaw\(\);\s*\} else \{\s*SolveLegacyYaw\(\);\s*\}' \

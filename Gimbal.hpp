@@ -310,16 +310,13 @@ class Gimbal : public LibXR::Application {
    * @brief 解析云台控制命令
    */
   void ParseCMD() {
-    ctrl_mode_snapshot_ = cmd_.GetCtrlMode();
-    ai_gimbal_status_snapshot_ = cmd_.GetAIGimbalStatus();
-    yaw_lqr_eso_config_snapshot_ = yaw_lqr_eso_config_;
-
+    const auto CTRL_MODE = cmd_.GetCtrlMode();
+    const bool AI_GIMBAL_ACTIVE = cmd_.GetAIGimbalStatus();
     const bool AI_YAW_ACTIVE =
-        ctrl_mode_snapshot_ == CMD::Mode::CMD_AUTO_CTRL &&
-        ai_gimbal_status_snapshot_;
+        CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && AI_GIMBAL_ACTIVE;
     ai_yaw_active_ = AI_YAW_ACTIVE;
 
-    if (ctrl_mode_snapshot_ == CMD::Mode::CMD_OP_CTRL) {
+    if (CTRL_MODE == CMD::Mode::CMD_OP_CTRL) {
       if (current_mode_ == GimbalEvent::SET_MODE_LOW_SENSITIVITY) {
         const float PIT_OPERATOR_RATE = cmd_data_.pit * GIMBAL_MAX_SPEED * 0.1f;
         target_pit_cmd_ += PIT_OPERATOR_RATE * dt_;
@@ -332,7 +329,7 @@ class Gimbal : public LibXR::Application {
         target_pit_ddot_ = 0.0f;
       }
     } else {
-      if (ai_gimbal_status_snapshot_) {
+      if (AI_GIMBAL_ACTIVE) {
         target_pit_cmd_ = cmd_data_.pit;
         target_pit_dot_ = cmd_data_.pit_dot;
         target_pit_ddot_ = cmd_data_.pit_ddot;
@@ -355,7 +352,7 @@ class Gimbal : public LibXR::Application {
     }
 
     if (!ai_yaw_active_) {
-      if (ctrl_mode_snapshot_ == CMD::Mode::CMD_OP_CTRL) {
+      if (CTRL_MODE == CMD::Mode::CMD_OP_CTRL) {
         const float YAW_SENSITIVITY =
             current_mode_ == GimbalEvent::SET_MODE_LOW_SENSITIVITY ? 0.1f
                                                                    : 1.0f;
@@ -486,15 +483,11 @@ class Gimbal : public LibXR::Application {
   Referee* referee_;
   bool rotor_ff_enabled_ = false;
   YawLqrEso::Config yaw_lqr_eso_config_{};
-  YawLqrEso::Config yaw_lqr_eso_config_snapshot_{};
   YawLqrEso yaw_lqr_eso_{};
-  YawLqrEso::Output yaw_lqr_eso_output_{};
   bool ai_yaw_active_ = false;
   bool yaw_lqr_eso_reset_pending_ = true;
   float last_submitted_yaw_torque_nm_ = 0.0f;
   bool last_submitted_yaw_torque_valid_ = false;
-  CMD::Mode ctrl_mode_snapshot_ = CMD::Mode::CMD_OP_CTRL;
-  bool ai_gimbal_status_snapshot_ = false;
   float chassis_gyro_z_ = 0.0f;
   uint32_t dualboard_chassis_mode_ = 0U;
   LibXR::Topic::TopicHandle chassis_gyro_z_topic_;
@@ -605,8 +598,8 @@ class Gimbal : public LibXR::Application {
                                         : 0.0f;
       yaw_lqr_eso_.Reset(euler_.Yaw(), gyro_data_.z(), PREVIOUS_TORQUE);
     }
-    yaw_lqr_eso_output_ = yaw_lqr_eso_.Calculate(
-        yaw_lqr_eso_config_snapshot_,
+    const auto YAW_LQR_ESO_OUTPUT = yaw_lqr_eso_.Calculate(
+        yaw_lqr_eso_config_,
         {.theta_rad = cmd_data_.yaw,
          .omega_rad_s = cmd_data_.yaw_dot,
          .alpha_rad_s2 = cmd_data_.yaw_ddot},
@@ -616,14 +609,14 @@ class Gimbal : public LibXR::Application {
          .valid = motor_feedback_online_,
          .torque_measurement_valid = std::isfinite(motor_yaw_feedback_.torque)},
         dt_);
-    if (!yaw_lqr_eso_output_.valid ||
-        !std::isfinite(yaw_lqr_eso_output_.tau_cmd_nm)) {
+    if (!YAW_LQR_ESO_OUTPUT.valid ||
+        !std::isfinite(YAW_LQR_ESO_OUTPUT.tau_cmd_nm)) {
       yaw_output_ = 0.0f;
       yaw_lqr_eso_reset_pending_ = true;
       return;
     }
     yaw_lqr_eso_reset_pending_ = false;
-    yaw_output_ = yaw_lqr_eso_output_.tau_cmd_nm;
+    yaw_output_ = YAW_LQR_ESO_OUTPUT.tau_cmd_nm;
   }
 
   /**
