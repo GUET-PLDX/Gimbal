@@ -18,6 +18,13 @@ class Block:
     body_end: int
 
 
+@dataclasses.dataclass(frozen=True)
+class DirectWrite:
+    identifier: str
+    operator: str
+    start: int
+
+
 def mask_non_code(source):
     masked = list(source)
     state = "code"
@@ -165,12 +172,41 @@ def require(description, pattern, source):
         raise CharacterizationError(f"missing: {description}")
 
 
+def direct_writes(source, identifiers):
+    identifier_pattern = "|".join(re.escape(identifier) for identifier in identifiers)
+    pattern = re.compile(
+        rf"(?P<prefix>\+\+|--)\s*(?P<prefix_name>\b(?:{identifier_pattern})\b)|"
+        rf"(?P<name>\b(?:{identifier_pattern})\b)\s*"
+        rf"(?P<operator>\+\+|--|<<=|>>=|[+\-*/%&|^]=|=(?!=))"
+    )
+    writes = []
+    for match in pattern.finditer(mask_non_code(source)):
+        identifier = match.group("prefix_name") or match.group("name")
+        operator = match.group("prefix") or match.group("operator")
+        writes.append(DirectWrite(identifier, operator, match.start()))
+    return writes
+
+
+def target_writes(source, axis):
+    identifiers = [
+        f"target_{axis}_cmd_",
+        f"target_{axis}_dot_",
+        f"target_{axis}_ddot_",
+    ]
+    return direct_writes(source, identifiers)
+
+
+def write_signatures(writes):
+    return [(write.identifier, write.operator) for write in writes]
+
+
 def require_target_write_sequence(description, source, axis, expected):
     writes = [
-        (match.group(1), match.group(2))
-        for match in re.finditer(
-            rf"target_{axis}_(cmd|dot|ddot)_\s*(\+=|-=|=)\s*[^;]+;", source
+        (
+            write.identifier.removeprefix(f"target_{axis}_").removesuffix("_"),
+            write.operator,
         )
+        for write in target_writes(source, axis)
     ]
     if writes != expected:
         raise CharacterizationError(f"missing: {description}")
@@ -193,16 +229,12 @@ PATROL_PITCH_TARGETS = (
 
 
 def require_pitch_before_yaw(body):
-    pitch_assignments = list(
-        re.finditer(r"target_pit_(?:cmd|dot|ddot)_\s*[-+]?=", body)
-    )
-    yaw_assignments = list(
-        re.finditer(r"target_yaw_(?:cmd|dot|ddot)_\s*[-+]?=", body)
-    )
+    pitch_assignments = target_writes(body, "pit")
+    yaw_assignments = target_writes(body, "yaw")
     if not pitch_assignments or not yaw_assignments:
         raise CharacterizationError("missing: complete Pitch or Yaw target stage")
-    if max(match.start() for match in pitch_assignments) >= min(
-        match.start() for match in yaw_assignments
+    if max(write.start for write in pitch_assignments) >= min(
+        write.start for write in yaw_assignments
     ):
         raise CharacterizationError("missing: Pitch-before-Yaw processing order")
 
@@ -224,6 +256,15 @@ def require_common_facts(body):
         r"AI_GIMBAL_ACTIVE; ai_yaw_active_ = AI_YAW_ACTIVE;",
         body,
     )
+    ai_yaw_writes = direct_writes(body, ["ai_yaw_active_"])
+    correct_ai_yaw_writes = re.findall(
+        r"\bai_yaw_active_\s*=\s*AI_YAW_ACTIVE\s*;", mask_non_code(body)
+    )
+    if (
+        write_signatures(ai_yaw_writes) != [("ai_yaw_active_", "=")]
+        or len(correct_ai_yaw_writes) != 1
+    ):
+        raise CharacterizationError("missing: unique AI Yaw activity assignment")
 
 
 def require_current_layout(body):
@@ -280,12 +321,8 @@ def require_current_layout(body):
     yaw_guard = find_if(
         body, r"!ai_yaw_active_", "target_yaw_cmd_", "AI Yaw bypass"
     )
-    all_yaw_assignments = re.findall(
-        r"target_yaw_(?:cmd|dot|ddot)_\s*[-+]?=", body
-    )
-    guarded_yaw_assignments = re.findall(
-        r"target_yaw_(?:cmd|dot|ddot)_\s*[-+]?=", yaw_guard.body
-    )
+    all_yaw_assignments = write_signatures(target_writes(body, "yaw"))
+    guarded_yaw_assignments = write_signatures(target_writes(yaw_guard.body, "yaw"))
     if all_yaw_assignments != guarded_yaw_assignments:
         raise CharacterizationError("missing: AI Yaw bypass")
 
@@ -406,9 +443,7 @@ def require_phased_layout(body):
     ai_guard = find_if(body, r"AI_YAW_ACTIVE", "return;", "AI Yaw bypass")
     if compact(ai_guard.body) != "return;":
         raise CharacterizationError("missing: AI Yaw bypass")
-    assignments_before_guard = re.findall(
-        r"target_yaw_(?:cmd|dot|ddot)_\s*[-+]?=", body[: ai_guard.end]
-    )
+    assignments_before_guard = target_writes(body[: ai_guard.end], "yaw")
     if assignments_before_guard:
         raise CharacterizationError("missing: AI Yaw bypass")
 
@@ -622,6 +657,15 @@ def current_negative_variants(source):
             "missing: AI Yaw bypass",
         ),
         (
+            "AI Yaw activity override",
+            replace_once(
+                source,
+                "ai_yaw_active_ = AI_YAW_ACTIVE;",
+                "ai_yaw_active_ = AI_YAW_ACTIVE;\n    ai_yaw_active_ = false;",
+            ),
+            "missing: unique AI Yaw activity assignment",
+        ),
+        (
             "AI Yaw complete guard coverage",
             leak_yaw_reset_outside_guard(source),
             "missing: AI Yaw bypass",
@@ -650,7 +694,7 @@ def current_negative_variants(source):
                 source,
                 "target_yaw_ddot_ = 0.0f;",
                 "target_yaw_ddot_ = 0.0f;\n"
-                "        target_yaw_cmd_ += 99.0f;",
+                "        target_yaw_cmd_ *= 2.0f;",
             ),
             "missing: exact current Yaw target writes",
         ),
@@ -730,6 +774,15 @@ def phased_negative_variants(source):
             "missing: AI Yaw bypass",
         ),
         (
+            "AI Yaw activity override",
+            replace_once(
+                source,
+                "ai_yaw_active_ = AI_YAW_ACTIVE;",
+                "ai_yaw_active_ = AI_YAW_ACTIVE;\n    ai_yaw_active_ = false;",
+            ),
+            "missing: unique AI Yaw activity assignment",
+        ),
+        (
             "AI Yaw complete guard coverage",
             move_phased_yaw_reset_before_guard(source),
             "missing: AI Yaw bypass",
@@ -758,7 +811,7 @@ def phased_negative_variants(source):
                 source,
                 "target_yaw_dot_ = YAW_OPERATOR_RATE;",
                 "target_yaw_dot_ = YAW_OPERATOR_RATE;\n"
-                "      target_yaw_cmd_ += 99.0f;",
+                "      ++target_yaw_cmd_;",
             ),
             "missing: exact phased Yaw target writes",
         ),
