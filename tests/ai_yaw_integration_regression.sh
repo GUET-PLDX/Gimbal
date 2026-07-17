@@ -138,8 +138,12 @@ forbid_file "${HEADER}" 'IsGm6020LimitValid|IsRotorCompatibleAiConfig' \
 
 need 'bool ai_yaw_active_ = false' 'direct AI active state'
 need 'bool yaw_lqr_eso_reset_pending_ = true' 'controller reset lifecycle state'
+need_count 'const auto CTRL_MODE = cmd_\.GetCtrlMode\(\);' 1 \
+  'one local control-mode sample'
+need_count 'const bool AI_GIMBAL_ACTIVE = cmd_\.GetAIGimbalStatus\(\);' 1 \
+  'one local AI Gimbal status sample'
 need_multiline \
-  'const auto CTRL_MODE = cmd_\.GetCtrlMode\(\);\s*const bool AI_GIMBAL_ACTIVE = cmd_\.GetAIGimbalStatus\(\);\s*const bool AI_YAW_ACTIVE =\s*CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && AI_GIMBAL_ACTIVE;' \
+  'const bool AI_YAW_ACTIVE =\s*CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && AI_GIMBAL_ACTIVE;' \
   'local CMD-based AI selection'
 need 'ai_yaw_active_ = AI_YAW_ACTIVE' 'direct AI active-state assignment'
 need_multiline \

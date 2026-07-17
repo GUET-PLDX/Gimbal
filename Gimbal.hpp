@@ -312,66 +312,55 @@ class Gimbal : public LibXR::Application {
   void ParseCMD() {
     const auto CTRL_MODE = cmd_.GetCtrlMode();
     const bool AI_GIMBAL_ACTIVE = cmd_.GetAIGimbalStatus();
+    const bool OPERATOR_CONTROL = CTRL_MODE == CMD::Mode::CMD_OP_CTRL;
+    const bool LOW_SENSITIVITY =
+        current_mode_ == GimbalEvent::SET_MODE_LOW_SENSITIVITY;
+    const bool AUTOPATROL = current_mode_ == GimbalEvent::SET_MODE_AUTOPATROL;
     const bool AI_YAW_ACTIVE =
         CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && AI_GIMBAL_ACTIVE;
     ai_yaw_active_ = AI_YAW_ACTIVE;
 
-    if (CTRL_MODE == CMD::Mode::CMD_OP_CTRL) {
-      if (current_mode_ == GimbalEvent::SET_MODE_LOW_SENSITIVITY) {
-        const float PIT_OPERATOR_RATE = cmd_data_.pit * GIMBAL_MAX_SPEED * 0.1f;
-        target_pit_cmd_ += PIT_OPERATOR_RATE * dt_;
-        target_pit_dot_ = PIT_OPERATOR_RATE;
-        target_pit_ddot_ = 0.0f;
-      } else {
-        const float PIT_OPERATOR_RATE = cmd_data_.pit * GIMBAL_MAX_SPEED;
-        target_pit_cmd_ += PIT_OPERATOR_RATE * dt_;
-        target_pit_dot_ = PIT_OPERATOR_RATE;
-        target_pit_ddot_ = 0.0f;
-      }
+    if (AI_YAW_ACTIVE) {
+      target_pit_cmd_ = cmd_data_.pit;
+      target_pit_dot_ = cmd_data_.pit_dot;
+      target_pit_ddot_ = cmd_data_.pit_ddot;
+    } else if (!OPERATOR_CONTROL && AUTOPATROL) {
+      target_pit_cmd_ -=
+          patrol_range_ * (2 / M_PI) *
+          asin(sin(patrol_omega_ *
+                   (LibXR::Timebase::GetMilliseconds() - patrol_start_time))) /
+          1000.0f;
+      target_pit_dot_ = 0.0f;
+      target_pit_ddot_ = 0.0f;
     } else {
-      if (AI_GIMBAL_ACTIVE) {
-        target_pit_cmd_ = cmd_data_.pit;
-        target_pit_dot_ = cmd_data_.pit_dot;
-        target_pit_ddot_ = cmd_data_.pit_ddot;
-      } else {
-        if (current_mode_ == GimbalEvent::SET_MODE_AUTOPATROL) {
-          target_pit_cmd_ -=
-              patrol_range_ * (2 / M_PI) *
-              asin(sin(patrol_omega_ * (LibXR::Timebase::GetMilliseconds() -
-                                        patrol_start_time))) /
-              1000.0f;
-          target_pit_dot_ = 0.0f;
-          target_pit_ddot_ = 0.0f;
-        } else {
-          const float PIT_OPERATOR_RATE = cmd_data_.pit * GIMBAL_MAX_SPEED;
-          target_pit_cmd_ += PIT_OPERATOR_RATE * dt_;
-          target_pit_dot_ = PIT_OPERATOR_RATE;
-          target_pit_ddot_ = 0.0f;
-        }
-      }
+      const float PITCH_SENSITIVITY =
+          OPERATOR_CONTROL && LOW_SENSITIVITY ? 0.1f : 1.0f;
+      const float PIT_OPERATOR_RATE =
+          cmd_data_.pit * GIMBAL_MAX_SPEED * PITCH_SENSITIVITY;
+      target_pit_cmd_ += PIT_OPERATOR_RATE * dt_;
+      target_pit_dot_ = PIT_OPERATOR_RATE;
+      target_pit_ddot_ = 0.0f;
     }
 
-    if (!ai_yaw_active_) {
-      if (CTRL_MODE == CMD::Mode::CMD_OP_CTRL) {
-        const float YAW_SENSITIVITY =
-            current_mode_ == GimbalEvent::SET_MODE_LOW_SENSITIVITY ? 0.1f
-                                                                   : 1.0f;
-        const float YAW_OPERATOR_RATE =
-            cmd_data_.yaw * GIMBAL_MAX_SPEED * YAW_SENSITIVITY;
-        target_yaw_cmd_ += YAW_OPERATOR_RATE * dt_;
-        target_yaw_dot_ = YAW_OPERATOR_RATE;
-        target_yaw_ddot_ = 0.0f;
-      } else if (current_mode_ == GimbalEvent::SET_MODE_AUTOPATROL) {
-        target_yaw_cmd_ += 1.0f * dt_;
-        target_yaw_dot_ = 1.0f;
-        target_yaw_ddot_ = 0.0f;
-      } else {
-        const float YAW_OPERATOR_RATE = -cmd_data_.yaw * GIMBAL_MAX_SPEED;
-        target_yaw_cmd_ += YAW_OPERATOR_RATE * dt_;
-        target_yaw_dot_ = YAW_OPERATOR_RATE;
-        target_yaw_ddot_ = 0.0f;
-      }
+    if (AI_YAW_ACTIVE) {
+      return;
     }
+
+    if (OPERATOR_CONTROL) {
+      const float YAW_SENSITIVITY = LOW_SENSITIVITY ? 0.1f : 1.0f;
+      const float YAW_OPERATOR_RATE =
+          cmd_data_.yaw * GIMBAL_MAX_SPEED * YAW_SENSITIVITY;
+      target_yaw_cmd_ += YAW_OPERATOR_RATE * dt_;
+      target_yaw_dot_ = YAW_OPERATOR_RATE;
+    } else if (AUTOPATROL) {
+      target_yaw_cmd_ += 1.0f * dt_;
+      target_yaw_dot_ = 1.0f;
+    } else {
+      const float YAW_OPERATOR_RATE = -cmd_data_.yaw * GIMBAL_MAX_SPEED;
+      target_yaw_cmd_ += YAW_OPERATOR_RATE * dt_;
+      target_yaw_dot_ = YAW_OPERATOR_RATE;
+    }
+    target_yaw_ddot_ = 0.0f;
   }
 
   /**
