@@ -48,6 +48,12 @@ Replace them as follows:
 
 No public API, manifest field, YAML field, topic, or motor command changes.
 
+This constraint applies only to the snapshot-removal and `ParseCMD()`
+deduplication tasks described here. Separate user approval covered removal of
+the atomic mode queue, Gimbal IMU topic parameters, IMU freshness and finite
+checks, the `dt` validity guard, the generic Yaw finite fallback, and
+controller transition reset maintenance.
+
 ## ParseCMD Structure
 
 Use one function with three explicit phases:

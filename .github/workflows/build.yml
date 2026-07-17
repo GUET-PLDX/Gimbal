@@ -114,6 +114,14 @@ jobs:
         run: |
           pip3 install xrobot libxr
 
+      - name: Run Gimbal regression tests
+        working-directory: Modules/${{ env.XR_MODULE_NAME }}
+        run: |
+          python3 tests/parse_cmd_behavior_regression.py --header Gimbal.hpp
+          python3 tests/parse_cmd_behavior_regression.py --header Gimbal.hpp --negative-checks
+          tests/gimbal_core_static_regression.sh
+          tests/ai_yaw_integration_regression.sh
+
       - name: Run xrobot_setup
         run: |
           xrobot_setup || true
