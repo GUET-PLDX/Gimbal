@@ -39,6 +39,12 @@ code = non_code.sub(
     lambda match: "".join("\n" if char == "\n" else " " for char in match.group()),
     source,
 )
+if re.search(
+    r"^[ \t]*#[ \t]*define[ \t]+InvalidateYawControllerState(?:[ \t]|\(|$)",
+    code,
+    re.M,
+) is not None:
+    raise SystemExit("forbidden: macro override of AI Yaw controller invalidation")
 matches = list(re.finditer(signature + r"\s*\{", code))
 if len(matches) != 1:
     raise SystemExit(
@@ -131,9 +137,6 @@ forbid_file "${HEADER}" 'ai_yaw_lqr_eso_enable' \
   'cross-platform AI Yaw master switch'
 forbid_file "${HEADER}" 'IsGm6020LimitValid|IsRotorCompatibleAiConfig' \
   'motor-specific route selection gates'
-forbid_file "${HEADER}" \
-  '^[[:space:]]*#[[:space:]]*define[[:space:]]+InvalidateYawControllerState(?:[[:space:]]|\(|$)' \
-  'macro override of AI Yaw controller invalidation'
 
 need 'bool ai_yaw_active_ = false' 'direct AI active state'
 need 'bool yaw_lqr_eso_reset_pending_ = true' 'controller reset lifecycle state'
