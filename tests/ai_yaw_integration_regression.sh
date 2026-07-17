@@ -113,6 +113,11 @@ need_multiline \
 need_multiline \
   'if \(dt_valid_\) \{\s*PitchLimit\(.*Solve\(\);\s*\} else \{\s*pid_pit_omega_\.SetFeedForward\(0\.0f\);\s*pid_yaw_omega_\.SetFeedForward\(0\.0f\);\s*last_pit_angle_loop_omega_ = 0\.0f;\s*last_yaw_angle_loop_omega_ = 0\.0f;\s*yaw_output_ = 0\.0f;\s*if \(ai_yaw_active_\) \{\s*yaw_lqr_eso_reset_pending_ = true;\s*\}\s*\}' \
   'invalid dt zeros Yaw output and rearms the active AI controller'
+need_in_lines \
+  'void Control\(\)' \
+  'void OnMonitor\(\)' \
+  'motor_yaw_->Relax\(\);\s*InvalidateYawControllerState\(\);\s*motor_pit_->Relax\(\);\s*return;' \
+  'feedback-offline RELAX invalidates the AI Yaw controller state'
 need 'void ControlYawMotor\(const Motor::MotorCmd& command\)' \
   'submission method without route confirmation parameter'
 need_multiline \
@@ -130,6 +135,11 @@ forbid_in_lines \
   '/\*\*' \
   'yaw_lqr_eso_reset_pending_|InvalidateYawControllerState' \
   'motor-not-ready submission must not rearm the controller after a valid AI calculation'
+need_in_lines \
+  'void SetMode\(GimbalEvent gimbal_event\)' \
+  '^};' \
+  'InvalidateYawControllerState\(\);\s*\}' \
+  'Gimbal mode transitions invalidate the AI Yaw controller state'
 
 need_count 'motor_yaw_->Control\(' 1 'one Yaw submission site'
 need 'void SolveLegacyYaw\(\)' 'legacy solve helper'
