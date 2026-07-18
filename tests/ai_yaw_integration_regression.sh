@@ -135,6 +135,15 @@ forbid_file "${HEADER}" 'ai_yaw_lqr_eso_enable' \
   'cross-platform AI Yaw master switch'
 forbid_file "${HEADER}" 'IsGm6020LimitValid|IsRotorCompatibleAiConfig' \
   'motor-specific route selection gates'
+forbid_file "${ALGORITHM_HEADER}" 'float j_kg_m2\{\}' \
+  'duplicate Yaw inertia in controller Config'
+forbid_file "${HEADER}" '^[[:space:]]+j_kg_m2:' \
+  'duplicate Yaw inertia in the Gimbal manifest'
+forbid_file "${ALGORITHM_HEADER}" 'torque_(min|max)_nm' \
+  'duplicate AI Yaw hard torque limits in controller Config'
+need_multiline \
+  'yaw_lqr_eso_\.Calculate\(.*dt_,\s*j_yaw_,\s*pid_yaw_omega_\.OutLimit\(\)\s*\)' \
+  'AI Yaw calculation receives the original inertia and PID hard limit'
 
 need 'bool ai_yaw_active_ = false' 'direct AI active state'
 need 'bool yaw_lqr_eso_reset_pending_ = true' 'controller reset lifecycle state'
@@ -153,14 +162,16 @@ need_multiline \
   'const auto YAW_LQR_ESO_OUTPUT = yaw_lqr_eso_\.Calculate\(.*cmd_data_\.yaw.*cmd_data_\.yaw_dot.*cmd_data_\.yaw_ddot' \
   'direct AI reference construction'
 need_multiline \
-  'if \(!YAW_LQR_ESO_OUTPUT\.valid.*\) \{\s*yaw_output_ = 0\.0f;\s*yaw_lqr_eso_reset_pending_ = true;\s*return;\s*\}' \
+  'if \(!YAW_LQR_ESO_OUTPUT\.valid.*\) \{\s*yaw_output = 0\.0f;\s*yaw_lqr_eso_reset_pending_ = true;\s*return;\s*\}' \
   'invalid AI output becomes zero and requests reset'
 need_multiline \
-  'yaw_lqr_eso_reset_pending_ = false;\s*yaw_output_ = YAW_LQR_ESO_OUTPUT\.tau_cmd_nm;' \
+  'yaw_lqr_eso_reset_pending_ = false;\s*yaw_output = YAW_LQR_ESO_OUTPUT\.tau_cmd_nm;' \
   'valid calculation clears reset before motor submission'
 need_multiline \
-  'if \(ai_yaw_active_\) \{\s*SolveAiYaw\(\);\s*\} else \{\s*SolveLegacyYaw\(\);\s*\}' \
-  'direct solve selection without action enum'
+  'void Solve\(float& pit_output, float& yaw_output\) \{.*if \(ai_yaw_active_\) \{' \
+  'single Solve function owns direct AI selection'
+forbid_file "${HEADER}" 'SolveAiYaw|SolveLegacyYaw' \
+  'split Yaw solve helpers'
 need 'void ControlYawMotor\(const Motor::MotorCmd& command\)' \
   'submission method without route confirmation parameter'
 need_multiline \
@@ -179,6 +190,7 @@ forbid_file "${HEADER}" 'ResetLegacyYawToCurrent|InvalidateYawControllerState' \
   'controller transition reset helpers'
 
 need_count 'motor_yaw_->Control\(' 1 'one Yaw submission site'
-need 'void SolveLegacyYaw\(\)' 'legacy solve helper'
+need_count 'void Solve\(float& pit_output, float& yaw_output\)' 1 \
+  'one complete control Solve function'
 
 echo "PASS: AI Yaw direct-routing integration regression"

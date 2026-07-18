@@ -24,9 +24,11 @@ inline void check_near(float actual, float expected, float tolerance,
 #define CHECK_NEAR(ACTUAL, EXPECTED, TOL) \
   check_near((ACTUAL), (EXPECTED), (TOL), #ACTUAL, __LINE__)
 
+inline constexpr float TEST_YAW_J_KG_M2 = 0.03f;
+inline constexpr float TEST_YAW_TORQUE_LIMIT_NM = 2.223f;
+
 inline YawLqrEso::Config base_yaw_config() {
-  return {.j_kg_m2 = 0.03f,
-          .b_nms_rad = 0.0f,
+  return {.b_nms_rad = 0.0f,
           .k_theta = 1.0f,
           .k_omega = 1.0f,
           .k_i = 0.2f,
@@ -43,8 +45,6 @@ inline YawLqrEso::Config base_yaw_config() {
           .tau_meas_lpf_alpha = 0.1f,
           .theta_deadband_rad = 0.0f,
           .torque_soft_limit_nm = 2.0f,
-          .torque_min_nm = -2.223f,
-          .torque_max_nm = 2.223f,
           .torque_slew_rate_nm_s = 1000.0f,
           .eso_enable = true,
           .eso_comp_enable = false,

@@ -2,11 +2,10 @@
 
 #include "yaw_lqr_eso_test_support.hpp"
 
-static YawLqrEso::Output calculate_once(YawLqrEso& controller,
-                                        const YawLqrEso::Config& config,
-                                        float theta_ref, float omega_ref,
-                                        float alpha_ref, float theta,
-                                        float omega) {
+static YawLqrEso::Output calculate_once(
+    YawLqrEso& controller, const YawLqrEso::Config& config, float theta_ref,
+    float omega_ref, float alpha_ref, float theta, float omega,
+    float torque_limit_nm = TEST_YAW_TORQUE_LIMIT_NM) {
   return controller.Calculate(config,
                               {.theta_rad = theta_ref,
                                .omega_rad_s = omega_ref,
@@ -16,7 +15,7 @@ static YawLqrEso::Output calculate_once(YawLqrEso& controller,
                                .tau_meas_nm = 0.0f,
                                .valid = true,
                                .torque_measurement_valid = true},
-                              0.002f);
+                              0.002f, TEST_YAW_J_KG_M2, torque_limit_nm);
 }
 
 static YawLqrEso::Output calculate_with_torque(YawLqrEso& controller,
@@ -35,24 +34,31 @@ static YawLqrEso::Output calculate_with_torque(YawLqrEso& controller,
        .tau_meas_nm = tau_meas_nm,
        .valid = true,
        .torque_measurement_valid = torque_measurement_valid},
-      0.002f);
+      0.002f, TEST_YAW_J_KG_M2, TEST_YAW_TORQUE_LIMIT_NM);
 }
 
 static void test_config_validation() {
   auto cfg = base_yaw_config();
-  CHECK(YawLqrEso::ValidateConfig(cfg));
-  cfg.j_kg_m2 = 0.0f;
-  CHECK(!YawLqrEso::ValidateConfig(cfg));
-  cfg = base_yaw_config();
+  CHECK(YawLqrEso::ValidateConfig(cfg, TEST_YAW_J_KG_M2,
+                                  TEST_YAW_TORQUE_LIMIT_NM));
+  CHECK(YawLqrEso::ValidateConfig(cfg, TEST_YAW_J_KG_M2, 0.0f));
+  CHECK(!YawLqrEso::ValidateConfig(cfg, TEST_YAW_J_KG_M2, -1.0f));
+  CHECK(!YawLqrEso::ValidateConfig(cfg, TEST_YAW_J_KG_M2,
+                                   std::numeric_limits<float>::quiet_NaN()));
+  CHECK(!YawLqrEso::ValidateConfig(cfg, std::numeric_limits<float>::quiet_NaN(),
+                                   TEST_YAW_TORQUE_LIMIT_NM));
   cfg.k_theta = -1.0f;
-  CHECK(!YawLqrEso::ValidateConfig(cfg));
+  CHECK(!YawLqrEso::ValidateConfig(cfg, TEST_YAW_J_KG_M2,
+                                   TEST_YAW_TORQUE_LIMIT_NM));
   cfg = base_yaw_config();
   cfg.torque_bias_enable = true;
   cfg.tau_meas_lpf_alpha = 1.1f;
-  CHECK(!YawLqrEso::ValidateConfig(cfg));
+  CHECK(!YawLqrEso::ValidateConfig(cfg, TEST_YAW_J_KG_M2,
+                                   TEST_YAW_TORQUE_LIMIT_NM));
   cfg = base_yaw_config();
   cfg.k_omega = std::numeric_limits<float>::quiet_NaN();
-  CHECK(!YawLqrEso::ValidateConfig(cfg));
+  CHECK(!YawLqrEso::ValidateConfig(cfg, TEST_YAW_J_KG_M2,
+                                   TEST_YAW_TORQUE_LIMIT_NM));
 }
 
 static void test_base_state_feedback_and_angle_unwrap() {
@@ -115,13 +121,20 @@ static void test_soft_and_hard_limit_order() {
   CHECK(!output.soft_limit_active);
 
   cfg.torque_soft_limit_nm = 0.0f;
-  cfg.torque_max_nm = 1.5f;
-  output = calculate_once(controller, cfg, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f);
+  output =
+      calculate_once(controller, cfg, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f, 1.5f);
   CHECK_NEAR(output.tau_pre_limit_nm, 3.0f, 1.0e-6f);
   CHECK_NEAR(output.tau_cmd_before_slew_nm, 1.5f, 1.0e-6f);
   CHECK_NEAR(output.tau_cmd_nm, 1.5f, 1.0e-6f);
   CHECK(!output.soft_limit_active);
   CHECK(output.hard_limit_active);
+
+  cfg.torque_soft_limit_nm = 0.0f;
+  output =
+      calculate_once(controller, cfg, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f, 0.0f);
+  CHECK_NEAR(output.tau_cmd_before_slew_nm, 3.0f, 1.0e-6f);
+  CHECK_NEAR(output.tau_cmd_nm, 3.0f, 1.0e-6f);
+  CHECK(!output.hard_limit_active);
 }
 
 static void test_slew_uses_only_committed_torque() {
@@ -148,8 +161,8 @@ static void test_slew_uses_only_committed_torque() {
   output = calculate_once(controller, cfg, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f);
   CHECK_NEAR(output.tau_cmd_nm, 1.9f, 1.0e-6f);
 
-  cfg.torque_max_nm = 1.0f;
-  output = calculate_once(controller, cfg, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f);
+  output =
+      calculate_once(controller, cfg, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f, 1.0f);
   CHECK(output.tau_cmd_nm <= 1.0f);
   CHECK_NEAR(output.tau_cmd_before_slew_nm, 1.0f, 1.0e-6f);
   CHECK(output.hard_limit_active);
@@ -309,7 +322,7 @@ static void test_eso_fresh_cycle_and_simultaneous_euler() {
   CHECK(!output.observer_ready);
 
   output = calculate_once(controller, cfg, 0.3f, 0.4f, 0.0f, 0.3f, 0.4f);
-  const float B0 = 1.0f / cfg.j_kg_m2;
+  const float B0 = 1.0f / TEST_YAW_J_KG_M2;
   const float BETA1 = 3.0f * cfg.eso_bandwidth_rad_s;
   const float BETA2 = 3.0f * cfg.eso_bandwidth_rad_s * cfg.eso_bandwidth_rad_s;
   const float BETA3 = cfg.eso_bandwidth_rad_s * cfg.eso_bandwidth_rad_s *
@@ -444,7 +457,7 @@ static void test_invalid_inputs_are_rejected() {
        .tau_meas_nm = 0.0f,
        .valid = true,
        .torque_measurement_valid = true},
-      0.002f);
+      0.002f, TEST_YAW_J_KG_M2, TEST_YAW_TORQUE_LIMIT_NM);
   CHECK(!output.valid);
 
   output = controller.Calculate(
@@ -454,7 +467,7 @@ static void test_invalid_inputs_are_rejected() {
        .tau_meas_nm = 0.0f,
        .valid = false,
        .torque_measurement_valid = true},
-      0.002f);
+      0.002f, TEST_YAW_J_KG_M2, TEST_YAW_TORQUE_LIMIT_NM);
   CHECK(!output.valid);
 
   output = controller.Calculate(
@@ -464,7 +477,7 @@ static void test_invalid_inputs_are_rejected() {
        .tau_meas_nm = 0.0f,
        .valid = true,
        .torque_measurement_valid = true},
-      0.0005f);
+      0.0005f, TEST_YAW_J_KG_M2, TEST_YAW_TORQUE_LIMIT_NM);
   CHECK(!output.valid);
 
   output = controller.Calculate(
@@ -474,7 +487,7 @@ static void test_invalid_inputs_are_rejected() {
        .tau_meas_nm = 0.0f,
        .valid = true,
        .torque_measurement_valid = true},
-      0.020f);
+      0.020f, TEST_YAW_J_KG_M2, TEST_YAW_TORQUE_LIMIT_NM);
   CHECK(output.valid);
 
   output = controller.Calculate(
@@ -484,7 +497,7 @@ static void test_invalid_inputs_are_rejected() {
        .tau_meas_nm = 0.0f,
        .valid = true,
        .torque_measurement_valid = true},
-      0.020001f);
+      0.020001f, TEST_YAW_J_KG_M2, TEST_YAW_TORQUE_LIMIT_NM);
   CHECK(!output.valid);
 
   output = calculate_once(controller, cfg, 0.0f, 0.0f, 100.0f, 0.0f, 0.0f);

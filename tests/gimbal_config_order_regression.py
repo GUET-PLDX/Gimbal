@@ -6,7 +6,6 @@ import yaml
 
 
 EXPECTED_FIELDS = (
-    "j_kg_m2",
     "b_nms_rad",
     "k_theta",
     "k_omega",
@@ -24,8 +23,6 @@ EXPECTED_FIELDS = (
     "tau_meas_lpf_alpha",
     "theta_deadband_rad",
     "torque_soft_limit_nm",
-    "torque_min_nm",
-    "torque_max_nm",
     "torque_slew_rate_nm_s",
     "eso_enable",
     "eso_comp_enable",
@@ -36,7 +33,6 @@ EXPECTED_FIELDS = (
 )
 
 EXPECTED_DEFAULTS = {
-    "j_kg_m2": 0.03,
     "b_nms_rad": 0.0,
     "k_theta": 1.0,
     "k_omega": 1.0,
@@ -54,8 +50,6 @@ EXPECTED_DEFAULTS = {
     "tau_meas_lpf_alpha": 0.1,
     "theta_deadband_rad": 0.0,
     "torque_soft_limit_nm": 2.0,
-    "torque_min_nm": -2.223,
-    "torque_max_nm": 2.223,
     "torque_slew_rate_nm_s": 1000.0,
     "eso_enable": True,
     "eso_comp_enable": False,
@@ -101,6 +95,13 @@ manifest_args = manifest["constructor_args"]
 if any(not isinstance(item, dict) or len(item) != 1 for item in manifest_args):
     raise SystemExit("manifest constructor args must be one-key mappings")
 manifest_names = [next(iter(item)) for item in manifest_args]
+if "referee" in manifest_names:
+    raise SystemExit("unused Referee parameter remains in Gimbal manifest")
+pid_yaw_omega = next(
+    item["pid_yaw_omega"] for item in manifest_args if "pid_yaw_omega" in item
+)
+if pid_yaw_omega.get("out_limit") != 2.223:
+    raise SystemExit("pid_yaw_omega out_limit must be the shared Yaw torque limit")
 expected_tail = [
     "rotor_ff_enabled",
     "yaw_lqr_eso",
@@ -116,6 +117,8 @@ yaw_manifest = next(
 )
 if not isinstance(yaw_manifest, dict):
     raise SystemExit("yaw_lqr_eso manifest config must be a mapping")
+if "j_kg_m2" in yaw_manifest:
+    raise SystemExit("Yaw inertia must come from the Gimbal j_yaw parameter")
 if tuple(yaw_manifest.keys()) != EXPECTED_FIELDS:
     raise SystemExit("manifest order mismatch")
 for key, expected_value in EXPECTED_DEFAULTS.items():
@@ -129,9 +132,13 @@ if not args.header_only:
     config = yaml.safe_load(pathlib.Path(args.config).read_text())
     gimbal = next(item for item in config["modules"] if item.get("name") == "Gimbal")
     gimbal_args = gimbal["constructor_args"]
+    if "referee" in gimbal_args:
+        raise SystemExit("unused Referee parameter remains in Gimbal YAML")
     if "ai_yaw_lqr_eso_enable" in gimbal_args:
         raise SystemExit("removed route master remains in target YAML")
     yaw_yaml = gimbal_args["yaw_lqr_eso"]
+    if "j_kg_m2" in yaw_yaml:
+        raise SystemExit("target YAML must not duplicate the Gimbal j_yaw parameter")
     if tuple(yaw_yaml.keys()) != EXPECTED_FIELDS:
         raise SystemExit("YAML order mismatch")
     if args.generated:

@@ -198,7 +198,7 @@ class ControllerAdapter final {
          .tau_meas_nm = 0.0f,
          .valid = true,
          .torque_measurement_valid = true},
-        static_cast<float>(dt));
+        static_cast<float>(dt), TEST_YAW_J_KG_M2, TEST_YAW_TORQUE_LIMIT_NM);
     return {
         .torque = static_cast<double>(OUTPUT.tau_cmd_nm),
         .z3 = static_cast<double>(OUTPUT.z3),
@@ -470,18 +470,11 @@ static SimulationResult run_simulation_case(const Scenario& scenario,
     max_abs_omega = std::max(max_abs_omega, std::fabs(state.omega));
 
     const YawLqrEso::Config& CONFIG = adapter.Config();
-    if (adapter.IsLegacy()) {
-      constraints_respected = constraints_respected &&
-                              std::fabs(OUTPUT.torque) <=
-                                  static_cast<double>(CONFIG.torque_max_nm) +
-                                      HARD_CONSTRAINT_TOLERANCE;
-    } else {
-      constraints_respected =
-          constraints_respected &&
-          OUTPUT.torque >= static_cast<double>(CONFIG.torque_min_nm) -
-                               HARD_CONSTRAINT_TOLERANCE &&
-          OUTPUT.torque <= static_cast<double>(CONFIG.torque_max_nm) +
-                               HARD_CONSTRAINT_TOLERANCE;
+    constraints_respected = constraints_respected &&
+                            std::fabs(OUTPUT.torque) <=
+                                static_cast<double>(TEST_YAW_TORQUE_LIMIT_NM) +
+                                    HARD_CONSTRAINT_TOLERANCE;
+    if (!adapter.IsLegacy()) {
       if (CONFIG.torque_slew_enable) {
         const double MAXIMUM_DELTA =
             static_cast<double>(CONFIG.torque_slew_rate_nm_s) * DT +
@@ -525,7 +518,7 @@ static SimulationResult run_simulation_case(const Scenario& scenario,
       }
       if (!adapter.IsLegacy() && OUTPUT.observer_ready) {
         const double ESTIMATED_DISTURBANCE_TORQUE =
-            static_cast<double>(CONFIG.j_kg_m2) * OUTPUT.z3;
+            static_cast<double>(TEST_YAW_J_KG_M2) * OUTPUT.z3;
         eso_error_samples.push_back(
             {.value = ESTIMATED_DISTURBANCE_TORQUE - disturbance,
              .dt = MEASUREMENT_DT});

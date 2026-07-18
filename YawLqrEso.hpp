@@ -3,10 +3,16 @@
 #include <cmath>
 #include <cstdint>
 
+/**
+ * @brief Yaw-axis LQR/LQI controller with an extended state observer.
+ *
+ * The class owns controller state, while plant inertia and the hard torque
+ * limit are supplied by the Gimbal module as runtime plant parameters.
+ */
 class YawLqrEso final {
  public:
+  /** @brief Tuning and feature switches for the Yaw controller. */
   struct Config {
-    float j_kg_m2{};
     float b_nms_rad{};
     float k_theta{};
     float k_omega{};
@@ -24,8 +30,6 @@ class YawLqrEso final {
     float tau_meas_lpf_alpha{};
     float theta_deadband_rad{};
     float torque_soft_limit_nm{};
-    float torque_min_nm{};
-    float torque_max_nm{};
     float torque_slew_rate_nm_s{};
     bool eso_enable{};
     bool eso_comp_enable{};
@@ -35,12 +39,14 @@ class YawLqrEso final {
     bool torque_slew_enable{};
   };
 
+  /** @brief Desired Yaw angle, angular velocity, and angular acceleration. */
   struct Reference {
     float theta_rad{};
     float omega_rad_s{};
     float alpha_rad_s2{};
   };
 
+  /** @brief Measured Yaw state and optional torque measurement. */
   struct Feedback {
     float theta_rad{};
     float omega_rad_s{};
@@ -49,6 +55,7 @@ class YawLqrEso final {
     bool torque_measurement_valid{};
   };
 
+  /** @brief Torque command plus diagnostics from one controller update. */
   struct Output {
     float theta_unwrapped_rad{};
     float e_theta_rad{};
@@ -75,10 +82,17 @@ class YawLqrEso final {
     bool slew_limit_active{};
   };
 
-  static bool ValidateConfig(const Config& config) {
-    if (!AllConfigFloatsFinite(config) || config.j_kg_m2 <= MIN_J_KG_M2 ||
-        config.b_nms_rad < 0.0f || config.k_theta < 0.0f ||
-        config.k_omega < 0.0f || config.theta_deadband_rad < 0.0f) {
+  /**
+   * @brief Validate tuning and runtime plant constraints.
+   * @return true when all values are finite and within supported ranges.
+   */
+  static bool ValidateConfig(const Config& config, float j_kg_m2,
+                             float torque_limit_nm) {
+    if (!AllConfigFloatsFinite(config) || !std::isfinite(j_kg_m2) ||
+        !std::isfinite(torque_limit_nm) || torque_limit_nm < 0.0f ||
+        j_kg_m2 <= MIN_J_KG_M2 || config.b_nms_rad < 0.0f ||
+        config.k_theta < 0.0f || config.k_omega < 0.0f ||
+        config.theta_deadband_rad < 0.0f) {
       return false;
     }
     if (config.eso_enable && config.eso_bandwidth_rad_s <= 0.0f) {
@@ -109,6 +123,10 @@ class YawLqrEso final {
     return true;
   }
 
+  /**
+   * @brief Reset observer and actuator-history state.
+   * @param previous_applied_torque_nm Last torque known to reach the motor.
+   */
   void Reset(float theta_rad, float omega_rad_s,
              float previous_applied_torque_nm) {
     unwrap_raw_theta_rad_ = theta_rad;
@@ -136,10 +154,16 @@ class YawLqrEso final {
     previous_torque_slew_enable_ = false;
   }
 
+  /**
+   * @brief Calculate one bounded Yaw torque command.
+   * @param j_kg_m2 Runtime Yaw plant inertia.
+   * @param torque_limit_nm Symmetric hard torque limit; zero disables it.
+   */
   Output Calculate(const Config& config, const Reference& reference,
-                   const Feedback& feedback, float dt_s) {
+                   const Feedback& feedback, float dt_s, float j_kg_m2,
+                   float torque_limit_nm) {
     Output output{};
-    if (!ValidateConfig(config) || !feedback.valid ||
+    if (!ValidateConfig(config, j_kg_m2, torque_limit_nm) || !feedback.valid ||
         !std::isfinite(reference.theta_rad) ||
         !std::isfinite(reference.omega_rad_s) ||
         !std::isfinite(reference.alpha_rad_s2) ||
@@ -151,17 +175,17 @@ class YawLqrEso final {
       return output;
     }
 
-    const float THETA_DELTA_RAD =
+    const float WRAPPED_THETA_DELTA_RAD =
         WrapPi(feedback.theta_rad - unwrap_raw_theta_rad_);
     const float NEXT_THETA_UNWRAPPED_RAD =
-        theta_unwrapped_rad_ + THETA_DELTA_RAD;
+        theta_unwrapped_rad_ + WRAPPED_THETA_DELTA_RAD;
 
     output.theta_unwrapped_rad = NEXT_THETA_UNWRAPPED_RAD;
     output.e_theta_rad =
         Deadband(WrapPi(feedback.theta_rad - reference.theta_rad),
                  config.theta_deadband_rad);
     output.e_omega_rad_s = feedback.omega_rad_s - reference.omega_rad_s;
-    output.tau_ff_alpha_nm = config.j_kg_m2 * reference.alpha_rad_s2;
+    output.tau_ff_alpha_nm = j_kg_m2 * reference.alpha_rad_s2;
     output.tau_ff_viscous_nm = config.b_nms_rad * reference.omega_rad_s;
 
     if (!config.eso_enable) {
@@ -177,27 +201,28 @@ class YawLqrEso final {
       observer_ready_ = false;
       observer_fresh_ = false;
     } else {
-      const float B0 = 1.0f / config.j_kg_m2;
-      const float BANDWIDTH_SQUARED =
+      const float PLANT_INPUT_GAIN = 1.0f / j_kg_m2;
+      const float ESO_BANDWIDTH_SQUARED =
           config.eso_bandwidth_rad_s * config.eso_bandwidth_rad_s;
-      const float BETA1 = 3.0f * config.eso_bandwidth_rad_s;
-      const float BETA2 = 3.0f * BANDWIDTH_SQUARED;
-      const float BETA3 = BANDWIDTH_SQUARED * config.eso_bandwidth_rad_s;
+      const float ESO_BETA1 = 3.0f * config.eso_bandwidth_rad_s;
+      const float ESO_BETA2 = 3.0f * ESO_BANDWIDTH_SQUARED;
+      const float ESO_BETA3 =
+          ESO_BANDWIDTH_SQUARED * config.eso_bandwidth_rad_s;
       const float OBSERVER_ERROR_RAD = NEXT_THETA_UNWRAPPED_RAD - z1_;
-      const float Z1_DOT = z2_ + BETA1 * OBSERVER_ERROR_RAD;
-      const float Z2_DOT = -(config.b_nms_rad / config.j_kg_m2) * z2_ +
-                           B0 * last_applied_torque_nm_ + z3_ +
-                           BETA2 * OBSERVER_ERROR_RAD;
-      const float Z3_DOT = BETA3 * OBSERVER_ERROR_RAD;
-      const float Z1_CANDIDATE = z1_ + dt_s * Z1_DOT;
-      const float Z2_CANDIDATE = z2_ + dt_s * Z2_DOT;
-      const float Z3_CANDIDATE = z3_ + dt_s * Z3_DOT;
+      const float ESO_Z1_DOT = z2_ + ESO_BETA1 * OBSERVER_ERROR_RAD;
+      const float ESO_Z2_DOT = -(config.b_nms_rad / j_kg_m2) * z2_ +
+                               PLANT_INPUT_GAIN * last_applied_torque_nm_ +
+                               z3_ + ESO_BETA2 * OBSERVER_ERROR_RAD;
+      const float ESO_Z3_DOT = ESO_BETA3 * OBSERVER_ERROR_RAD;
+      const float ESO_Z1_CANDIDATE = z1_ + dt_s * ESO_Z1_DOT;
+      const float ESO_Z2_CANDIDATE = z2_ + dt_s * ESO_Z2_DOT;
+      const float ESO_Z3_CANDIDATE = z3_ + dt_s * ESO_Z3_DOT;
 
-      if (std::isfinite(Z1_CANDIDATE) && std::isfinite(Z2_CANDIDATE) &&
-          std::isfinite(Z3_CANDIDATE)) {
-        z1_ = Z1_CANDIDATE;
-        z2_ = Z2_CANDIDATE;
-        z3_ = Z3_CANDIDATE;
+      if (std::isfinite(ESO_Z1_CANDIDATE) && std::isfinite(ESO_Z2_CANDIDATE) &&
+          std::isfinite(ESO_Z3_CANDIDATE)) {
+        z1_ = ESO_Z1_CANDIDATE;
+        z2_ = ESO_Z2_CANDIDATE;
+        z3_ = ESO_Z3_CANDIDATE;
         observer_ready_ = true;
       } else {
         z1_ = NEXT_THETA_UNWRAPPED_RAD;
@@ -230,10 +255,10 @@ class YawLqrEso final {
                         config.k_omega * output.e_omega_rad_s;
 
     if (config.eso_comp_enable && observer_ready_) {
-      const float B0 = 1.0f / config.j_kg_m2;
+      const float PLANT_INPUT_GAIN = 1.0f / j_kg_m2;
       output.tau_eso_raw_nm =
-          Clamp(-config.eso_comp_gain * z3_ / B0, -config.eso_comp_limit_nm,
-                config.eso_comp_limit_nm);
+          Clamp(-config.eso_comp_gain * z3_ / PLANT_INPUT_GAIN,
+                -config.eso_comp_limit_nm, config.eso_comp_limit_nm);
       const bool OMEGA_GATE_PASSED =
           config.eso_omega_gate_rad_s <= 0.0f ||
           std::fabs(feedback.omega_rad_s) <= config.eso_omega_gate_rad_s;
@@ -284,10 +309,10 @@ class YawLqrEso final {
       constrained_torque_nm = SOFT_LIMITED_TORQUE_NM;
     }
 
-    const bool HARD_LIMIT_ENABLED = config.torque_min_nm < config.torque_max_nm;
+    const bool HARD_LIMIT_ENABLED = torque_limit_nm > 0.0f;
     if (HARD_LIMIT_ENABLED) {
-      const float HARD_LIMITED_TORQUE_NM = Clamp(
-          constrained_torque_nm, config.torque_min_nm, config.torque_max_nm);
+      const float HARD_LIMITED_TORQUE_NM =
+          Clamp(constrained_torque_nm, -torque_limit_nm, torque_limit_nm);
       output.hard_limit_active =
           HARD_LIMITED_TORQUE_NM != constrained_torque_nm;
       constrained_torque_nm = HARD_LIMITED_TORQUE_NM;
@@ -311,15 +336,15 @@ class YawLqrEso final {
       }
       if (HARD_LIMIT_ENABLED) {
         if (!limit_intersection_enabled) {
-          limit_intersection_min_nm = config.torque_min_nm;
-          limit_intersection_max_nm = config.torque_max_nm;
+          limit_intersection_min_nm = -torque_limit_nm;
+          limit_intersection_max_nm = torque_limit_nm;
           limit_intersection_enabled = true;
         } else {
-          if (config.torque_min_nm > limit_intersection_min_nm) {
-            limit_intersection_min_nm = config.torque_min_nm;
+          if (-torque_limit_nm > limit_intersection_min_nm) {
+            limit_intersection_min_nm = -torque_limit_nm;
           }
-          if (config.torque_max_nm < limit_intersection_max_nm) {
-            limit_intersection_max_nm = config.torque_max_nm;
+          if (torque_limit_nm < limit_intersection_max_nm) {
+            limit_intersection_max_nm = torque_limit_nm;
           }
         }
       }
@@ -333,13 +358,13 @@ class YawLqrEso final {
         next_slew_anchor_torque_nm = output.tau_cmd_before_slew_nm;
       }
 
-      const float MAXIMUM_TORQUE_DELTA_NM = config.torque_slew_rate_nm_s * dt_s;
+      const float MAX_TORQUE_DELTA_NM = config.torque_slew_rate_nm_s * dt_s;
       const float SLEW_MIN_NM =
-          next_slew_anchor_torque_nm - MAXIMUM_TORQUE_DELTA_NM;
+          next_slew_anchor_torque_nm - MAX_TORQUE_DELTA_NM;
       const float SLEW_MAX_NM =
-          next_slew_anchor_torque_nm + MAXIMUM_TORQUE_DELTA_NM;
-      if (!std::isfinite(MAXIMUM_TORQUE_DELTA_NM) ||
-          !std::isfinite(SLEW_MIN_NM) || !std::isfinite(SLEW_MAX_NM)) {
+          next_slew_anchor_torque_nm + MAX_TORQUE_DELTA_NM;
+      if (!std::isfinite(MAX_TORQUE_DELTA_NM) || !std::isfinite(SLEW_MIN_NM) ||
+          !std::isfinite(SLEW_MAX_NM)) {
         return {};
       }
       output.tau_cmd_nm =
@@ -367,6 +392,7 @@ class YawLqrEso final {
     return output;
   }
 
+  /** @brief Commit the torque that the motor actually accepted. */
   void CommitAppliedTorque(float applied_torque_nm) {
     if (!std::isfinite(applied_torque_nm)) {
       return;
@@ -385,6 +411,7 @@ class YawLqrEso final {
   static constexpr float PI = 3.14159265358979323846f;
   static constexpr float TWO_PI = 2.0f * PI;
 
+  /** @brief Clamp a scalar to an inclusive range. */
   static float Clamp(float value, float minimum, float maximum) {
     if (value < minimum) {
       return minimum;
@@ -395,6 +422,7 @@ class YawLqrEso final {
     return value;
   }
 
+  /** @brief Wrap an angle to [-pi, pi). */
   static float WrapPi(float angle_rad) {
     float wrapped_rad = std::fmod(angle_rad + PI, TWO_PI);
     if (wrapped_rad < 0.0f) {
@@ -403,6 +431,7 @@ class YawLqrEso final {
     return wrapped_rad - PI;
   }
 
+  /** @brief Remove a symmetric deadband from a scalar error. */
   static float Deadband(float value, float deadband) {
     if (value > deadband) {
       return value - deadband;
@@ -413,6 +442,7 @@ class YawLqrEso final {
     return 0.0f;
   }
 
+  /** @brief Check the numerical diagnostics before publishing an output. */
   static bool BaseOutputIsFinite(const Output& output) {
     return std::isfinite(output.theta_unwrapped_rad) &&
            std::isfinite(output.e_theta_rad) &&
@@ -430,10 +460,10 @@ class YawLqrEso final {
            std::isfinite(output.tau_cmd_nm);
   }
 
+  /** @brief Check all floating-point tuning values for NaN or infinity. */
   static bool AllConfigFloatsFinite(const Config& config) {
-    return std::isfinite(config.j_kg_m2) && std::isfinite(config.b_nms_rad) &&
-           std::isfinite(config.k_theta) && std::isfinite(config.k_omega) &&
-           std::isfinite(config.k_i) &&
+    return std::isfinite(config.b_nms_rad) && std::isfinite(config.k_theta) &&
+           std::isfinite(config.k_omega) && std::isfinite(config.k_i) &&
            std::isfinite(config.theta_integral_limit_rad_s) &&
            std::isfinite(config.tau_coulomb_nm) &&
            std::isfinite(config.coulomb_smooth_rad_s) &&
@@ -447,8 +477,6 @@ class YawLqrEso final {
            std::isfinite(config.tau_meas_lpf_alpha) &&
            std::isfinite(config.theta_deadband_rad) &&
            std::isfinite(config.torque_soft_limit_nm) &&
-           std::isfinite(config.torque_min_nm) &&
-           std::isfinite(config.torque_max_nm) &&
            std::isfinite(config.torque_slew_rate_nm_s);
   }
 

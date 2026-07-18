@@ -94,7 +94,6 @@ Depends:
   - pldx/CMD
   - pldx/Motor
   - pldx/BMI088
-  - pldx/Referee
 
 ## 6. 代码入口
 Modules/Gimbal/Gimbal.hpp
