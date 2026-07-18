@@ -56,6 +56,12 @@ jobs:
       - name: Pull libxr to ./libxr
         run: git clone --depth=1 https://github.com/Jiu-xiao/libxr ./libxr
 
+      - name: Checkout Chassis module
+        uses: actions/checkout@v4
+        with:
+          repository: GUET-PLDX/Chassis
+          path: Modules/Chassis
+
       - name: Checkout Motor module
         uses: actions/checkout@v4
         with:
