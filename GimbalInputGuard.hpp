@@ -36,6 +36,10 @@ inline bool AcceptActiveRequest(bool inputs_valid, FaultLatch& fault_latched) {
   return true;
 }
 
+inline bool ActiveRequestCanRearm(bool request_after_fresh, bool inputs_valid) {
+  return request_after_fresh && inputs_valid;
+}
+
 template <typename FaultLatch>
 inline bool ControlAllowed(bool inputs_valid, const FaultLatch& fault_latched) {
   return inputs_valid && !static_cast<bool>(fault_latched);

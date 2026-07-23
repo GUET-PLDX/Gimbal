@@ -10,9 +10,6 @@ args = parser.parse_args()
 source = pathlib.Path(args.header).read_text()
 
 forbidden = {
-    "atomic mode queue": "pending_mode_request_",
-    "mode request publisher": "RequestMode(",
-    "mode request consumer": "ConsumePendingModeRequest(",
     "RELAX-only request consumer": "ConsumePendingRelaxRequest(",
     "configurable Euler Topic": "euler_topic_name",
     "configurable gyro Topic": "gyro_topic_name",

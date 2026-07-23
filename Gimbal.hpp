@@ -104,6 +104,7 @@ depends:
 #include "libxr_def.hpp"
 #include "libxr_time.hpp"
 #include "pid.hpp"
+#include "queue.hpp"
 #include "thread.hpp"
 #include "timebase.hpp"
 #include "transform.hpp"
@@ -197,7 +198,7 @@ class Gimbal : public LibXR::Application {
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
           UNUSED(event_id);
-          gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
+          gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);
         },
         this);
 
@@ -205,14 +206,14 @@ class Gimbal : public LibXR::Application {
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
           UNUSED(event_id);
-          gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
+          gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);
         },
         this);
 
     auto callback = LibXR::Callback<uint32_t>::Create(
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
-          gimbal->SetMode(static_cast<GimbalEvent>(event_id));
+          gimbal->RequestMode(static_cast<GimbalEvent>(event_id));
         },
         this);
 
@@ -250,6 +251,7 @@ class Gimbal : public LibXR::Application {
     gimbal->last_online_time_ = LibXR::Timebase::GetMicroseconds();
 
     while (true) {
+      gimbal->ConsumeModeRequests();
       if (cmd_suber.Available()) {
         gimbal->cmd_data_ = cmd_suber.GetData();
         cmd_suber.StartWaiting();
@@ -305,13 +307,15 @@ class Gimbal : public LibXR::Application {
                gimbal->gyro_data_.y(), gimbal->gyro_data_.z()});
       gimbal->imu_input_valid_ = IMU_VALID;
       const bool INPUTS_VALID = gimbal->motor_feedback_online_ && IMU_VALID;
-      gimbal->inputs_online_ = INPUTS_VALID;
       GimbalInputGuard::UpdateFaultLatch(INPUTS_VALID,
                                          gimbal->input_fault_latched_);
+      gimbal->ApplyConsumedModeRequest(INPUTS_VALID);
+      gimbal->inputs_fresh_observed_ = INPUTS_VALID;
       if (!GimbalInputGuard::ControlAllowed(INPUTS_VALID,
                                             gimbal->input_fault_latched_)) {
         if (!INPUTS_VALID) {
-          gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
+          gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);
+          gimbal->ApplyMode(GimbalEvent::SET_MODE_RELAX);
         }
         gimbal->Control();
         LibXR::Thread::Sleep(2);
@@ -413,7 +417,8 @@ class Gimbal : public LibXR::Application {
     if (!GimbalInputGuard::ControlAllowed(INPUTS_VALID, input_fault_latched_)) {
       // 反馈无效时立即切松弛，避免继续使用旧反馈闭环输出。
       if (!INPUTS_VALID) {
-        SetMode(GimbalEvent::SET_MODE_RELAX);
+        RequestMode(GimbalEvent::SET_MODE_RELAX);
+        ApplyMode(GimbalEvent::SET_MODE_RELAX);
       }
       SubmitRelaxOutput();
       return;
@@ -468,7 +473,6 @@ class Gimbal : public LibXR::Application {
   Motor::Feedback motor_pit_feedback_;
   bool motor_feedback_online_ = true;
   bool imu_input_valid_ = false;
-  std::atomic_bool inputs_online_{false};
   std::atomic_bool input_fault_latched_{true};
 
   CMD::GimbalCMD cmd_data_;
@@ -523,6 +527,13 @@ class Gimbal : public LibXR::Application {
   bool last_submitted_yaw_torque_valid_ = false;
   ChassisMotionState chassis_motion_state_{};
   LibXR::Topic::TopicHandle chassis_motion_state_topic_;
+  LibXR::MPMCQueue<GimbalEvent> mode_requests_{4};
+  std::atomic_bool relax_requested_{false};
+  GimbalEvent pending_mode_request_ = GimbalEvent::SET_MODE_RELAX;
+  bool pending_mode_request_valid_ = false;
+  bool pending_mode_request_rearm_eligible_ = false;
+  bool pending_relax_request_ = false;
+  bool inputs_fresh_observed_ = false;
   LibXR::Thread thread_;
 
   /*----------工具函数--------------------------------*/
@@ -568,6 +579,68 @@ class Gimbal : public LibXR::Application {
     last_yaw_angle_loop_omega_ = 0.0f;
     motor_yaw_->Relax();
     motor_pit_->Relax();
+  }
+
+  void RequestMode(GimbalEvent gimbal_event) {
+    if (gimbal_event == GimbalEvent::SET_MODE_RELAX) {
+      relax_requested_.store(true);
+      return;
+    }
+
+    const auto PUSH_RESULT = mode_requests_.Push(gimbal_event);
+    if (PUSH_RESULT == LibXR::ErrorCode::FULL) {
+      GimbalEvent discarded_mode;
+      (void)mode_requests_.Pop(discarded_mode);
+      (void)mode_requests_.Push(gimbal_event);
+    }
+  }
+
+  void ConsumeModeRequests() {
+    const bool RELAX_REQUESTED = relax_requested_.exchange(false);
+    GimbalEvent latest_mode;
+    bool mode_request_available = false;
+    while (mode_requests_.Pop(latest_mode) == LibXR::ErrorCode::OK) {
+      pending_mode_request_ = latest_mode;
+      mode_request_available = true;
+    }
+
+    const bool LATE_RELAX_REQUESTED = relax_requested_.exchange(false);
+    if (RELAX_REQUESTED || LATE_RELAX_REQUESTED) {
+      pending_mode_request_valid_ = false;
+      pending_relax_request_ = true;
+      return;
+    }
+
+    pending_relax_request_ = false;
+    pending_mode_request_valid_ = mode_request_available;
+    pending_mode_request_rearm_eligible_ =
+        mode_request_available && inputs_fresh_observed_;
+  }
+
+  void ApplyConsumedModeRequest(bool inputs_valid) {
+    if (relax_requested_.exchange(false)) {
+      pending_mode_request_valid_ = false;
+      pending_relax_request_ = true;
+    }
+    if (pending_relax_request_) {
+      pending_relax_request_ = false;
+      ApplyMode(GimbalEvent::SET_MODE_RELAX);
+      return;
+    }
+    if (!pending_mode_request_valid_) {
+      return;
+    }
+
+    pending_mode_request_valid_ = false;
+    if (!GimbalInputGuard::ActiveRequestCanRearm(
+            pending_mode_request_rearm_eligible_, inputs_valid)) {
+      return;
+    }
+    if (!GimbalInputGuard::AcceptActiveRequest(inputs_valid,
+                                               input_fault_latched_)) {
+      return;
+    }
+    ApplyMode(pending_mode_request_);
   }
 
   void ControlYawMotor(const Motor::MotorCmd& command) {
@@ -662,16 +735,7 @@ class Gimbal : public LibXR::Application {
    *
    * @param gimbal_event 云台事件类型
    */
-  void SetMode(GimbalEvent gimbal_event) {
-    const bool ACTIVE_MODE_REQUEST =
-        gimbal_event == GimbalEvent::SET_MODE_COMMON ||
-        gimbal_event == GimbalEvent::SET_MODE_AUTOPATROL ||
-        gimbal_event == GimbalEvent::SET_MODE_LOW_SENSITIVITY;
-    if (ACTIVE_MODE_REQUEST &&
-        !GimbalInputGuard::AcceptActiveRequest(
-            static_cast<bool>(inputs_online_), input_fault_latched_)) {
-      return;
-    }
+  void ApplyMode(GimbalEvent gimbal_event) {
     if (gimbal_event == current_mode_) {
       return;
     }

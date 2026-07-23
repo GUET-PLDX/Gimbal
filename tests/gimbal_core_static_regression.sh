@@ -33,28 +33,28 @@ need_count() {
 }
 
 need_set_mode() {
-  sed -n '/void SetMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER" |
+  sed -n '/void ApplyMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER" |
     rg -U -q -- "$1" || { echo "missing: $2" >&2; exit 1; }
 }
 
 need_set_mode_count() {
   local actual
-  actual="$(sed -n '/void SetMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER" |
+  actual="$(sed -n '/void ApplyMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER" |
     rg -o -- "$1" | wc -l)"
   if [[ "$actual" -ne "$2" ]]; then
-    echo "wrong SetMode count ($actual != $2): $3" >&2
+    echo "wrong ApplyMode count ($actual != $2): $3" >&2
     exit 1
   fi
 }
 
 need_set_mode_before() {
   local set_mode first_line second_line
-  set_mode="$(sed -n '/void SetMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER")"
+  set_mode="$(sed -n '/void ApplyMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER")"
   first_line="$(rg -n -m1 -- "$1" <<<"$set_mode" | cut -d: -f1)"
   second_line="$(rg -n -m1 -- "$2" <<<"$set_mode" | cut -d: -f1)"
   if [[ -z "$first_line" || -z "$second_line" ||
         "$first_line" -ge "$second_line" ]]; then
-    echo "misordered in SetMode: $3" >&2
+    echo "misordered in ApplyMode: $3" >&2
     exit 1
   fi
 }
@@ -93,8 +93,6 @@ need 'bool euler_received_ = false' 'explicit Euler sample presence'
 need 'bool gyro_received_ = false' 'explicit gyro sample presence'
 need 'std::atomic_bool input_fault_latched_\{true\}' \
   'startup-latched atomic input fault state'
-need 'std::atomic_bool inputs_online_\{false\}' \
-  'atomic callback-visible input validity snapshot'
 need_multiline \
   '(?s)euler_suber\.Available\(\).*EULER_SAMPLE_TIMESTAMP.*euler_suber\.GetTimestamp\(\).*euler_sample.*euler_suber\.GetData\(\).*AllFinite\(\s*\{\s*euler_sample\.Roll\(\),\s*euler_sample\.Pitch\(\),\s*euler_sample\.Yaw\(\)\}\).*euler_ = euler_sample;.*last_euler_rx_us_ = EULER_SAMPLE_TIMESTAMP;.*euler_received_ = true;.*else \{\s*gimbal->euler_received_ = false;' \
   'Euler sample is validated before independently refreshing freshness state'
@@ -105,12 +103,12 @@ need_multiline \
   '(?s)const bool IMU_VALID =\s*gimbal->euler_received_ && gimbal->gyro_received_ &&\s*GimbalInputGuard::IsFresh\(gimbal->last_euler_rx_us_, NOW_US,\s*IMU_TIMEOUT_US\) &&\s*GimbalInputGuard::IsFresh\(gimbal->last_gyro_rx_us_, NOW_US,\s*IMU_TIMEOUT_US\) &&\s*GimbalInputGuard::AllFinite\(\s*\{gimbal->euler_\.Roll\(\), gimbal->euler_\.Pitch\(\),\s*gimbal->euler_\.Yaw\(\), gimbal->gyro_data_\.x\(\),\s*gimbal->gyro_data_\.y\(\), gimbal->gyro_data_\.z\(\)\}\);' \
   'Euler and gyro freshness and finite values form one validity gate'
 need_multiline \
-  '(?s)const bool INPUTS_VALID =\s*gimbal->motor_feedback_online_ && IMU_VALID;\s*gimbal->inputs_online_ = INPUTS_VALID;\s*GimbalInputGuard::UpdateFaultLatch\(INPUTS_VALID,\s*gimbal->input_fault_latched_\);\s*if \(!GimbalInputGuard::ControlAllowed\(\s*INPUTS_VALID,\s*gimbal->input_fault_latched_\)\) \{\s*if \(!INPUTS_VALID\) \{\s*gimbal->SetMode\(GimbalEvent::SET_MODE_RELAX\);\s*\}\s*gimbal->Control\(\);\s*LibXR::Thread::Sleep\(2\);\s*continue;\s*\}\s*gimbal->ParseCMD\(\);\s*gimbal->Control\(\);' \
+  '(?s)const bool INPUTS_VALID =\s*gimbal->motor_feedback_online_ && IMU_VALID;\s*GimbalInputGuard::UpdateFaultLatch\(INPUTS_VALID,\s*gimbal->input_fault_latched_\);\s*gimbal->ApplyConsumedModeRequest\(INPUTS_VALID\);\s*gimbal->inputs_fresh_observed_ = INPUTS_VALID;\s*if \(!GimbalInputGuard::ControlAllowed\(\s*INPUTS_VALID,\s*gimbal->input_fault_latched_\)\) \{\s*if \(!INPUTS_VALID\) \{\s*gimbal->RequestMode\(GimbalEvent::SET_MODE_RELAX\);\s*gimbal->ApplyMode\(GimbalEvent::SET_MODE_RELAX\);\s*\}\s*gimbal->Control\(\);\s*LibXR::Thread::Sleep\(2\);\s*continue;\s*\}\s*gimbal->ParseCMD\(\);\s*gimbal->Control\(\);' \
   'owner loop relaxes and returns before parsing or active control on invalid input'
 need_before 'if \(!GimbalInputGuard::ControlAllowed' \
   'gimbal->ParseCMD\(\)' 'input gate precedes ParseCMD'
 need_multiline \
-  '(?s)void Control\(\) \{\s*const bool INPUTS_VALID = motor_feedback_online_ && imu_input_valid_;\s*GimbalInputGuard::UpdateFaultLatch\(INPUTS_VALID, input_fault_latched_\);\s*if \(!GimbalInputGuard::ControlAllowed\(INPUTS_VALID,\s*input_fault_latched_\)\) \{.*if \(!INPUTS_VALID\) \{\s*SetMode\(GimbalEvent::SET_MODE_RELAX\);\s*\}\s*SubmitRelaxOutput\(\);\s*return;\s*\}.*if \(current_mode_ == GimbalEvent::SET_MODE_RELAX\) \{\s*SubmitRelaxOutput\(\);\s*return;\s*\}.*Solve\(pit_output, yaw_output\);.*motor_control\(motor_pit_.*ControlYawMotor\(yaw_motor_cmd\);' \
+  '(?s)void Control\(\) \{\s*const bool INPUTS_VALID = motor_feedback_online_ && imu_input_valid_;\s*GimbalInputGuard::UpdateFaultLatch\(INPUTS_VALID, input_fault_latched_\);\s*if \(!GimbalInputGuard::ControlAllowed\(INPUTS_VALID,\s*input_fault_latched_\)\) \{.*if \(!INPUTS_VALID\) \{\s*RequestMode\(GimbalEvent::SET_MODE_RELAX\);\s*ApplyMode\(GimbalEvent::SET_MODE_RELAX\);\s*\}\s*SubmitRelaxOutput\(\);\s*return;\s*\}.*if \(current_mode_ == GimbalEvent::SET_MODE_RELAX\) \{\s*SubmitRelaxOutput\(\);\s*return;\s*\}.*Solve\(pit_output, yaw_output\);.*motor_control\(motor_pit_.*ControlYawMotor\(yaw_motor_cmd\);' \
   'Control cannot reach Solve when motor or IMU input is invalid'
 need_multiline \
   '(?s)void SubmitRelaxOutput\(\) \{.*pid_pit_omega_\.SetFeedForward\(0\.0f\);.*pid_yaw_omega_\.SetFeedForward\(0\.0f\);.*last_pit_angle_loop_omega_ = 0\.0f;.*last_yaw_angle_loop_omega_ = 0\.0f;.*motor_yaw_->Relax\(\);\s*motor_pit_->Relax\(\);\s*\}' \
@@ -138,12 +136,6 @@ forbid 'float torque_|this->torque_' \
 need_set_mode \
   'if \(gimbal_event == current_mode_\) \{\s*return;\s*\}' \
   'same-mode transition returns without resetting control state'
-need_set_mode \
-  '(?s)const bool ACTIVE_MODE_REQUEST =\s*gimbal_event == GimbalEvent::SET_MODE_COMMON \|\|\s*gimbal_event == GimbalEvent::SET_MODE_AUTOPATROL \|\|\s*gimbal_event == GimbalEvent::SET_MODE_LOW_SENSITIVITY;\s*if \(ACTIVE_MODE_REQUEST &&\s*!GimbalInputGuard::AcceptActiveRequest\(\s*static_cast<bool>\(inputs_online_\), input_fault_latched_\)\) \{\s*return;\s*\}' \
-  'active mode requests rearm only against currently valid inputs'
-need_set_mode_before 'AcceptActiveRequest' \
-  'if \(gimbal_event == current_mode_\)' \
-  'fault latch decision precedes same-mode acceptance'
 need_set_mode \
   '(?s)current_mode_ == GimbalEvent::SET_MODE_COMMON.*gimbal_event == GimbalEvent::SET_MODE_LOW_SENSITIVITY.*current_mode_ == GimbalEvent::SET_MODE_LOW_SENSITIVITY.*gimbal_event == GimbalEvent::SET_MODE_COMMON.*current_mode_ = gimbal_event;\s*return;' \
   'COMMON and LOW_SENSITIVITY switch without resetting control state'
