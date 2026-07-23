@@ -118,6 +118,11 @@ enum class GimbalEvent : uint8_t {
   SET_MODE_AUTOPATROL,
   SET_MODE_LOW_SENSITIVITY
 };
+struct GimbalModeRequest {
+  GimbalEvent mode;
+  uint32_t sequence;
+  uint32_t fresh_epoch;
+};
 class Gimbal : public LibXR::Application {
  public:
   /**
@@ -309,8 +314,8 @@ class Gimbal : public LibXR::Application {
       const bool INPUTS_VALID = gimbal->motor_feedback_online_ && IMU_VALID;
       GimbalInputGuard::UpdateFaultLatch(INPUTS_VALID,
                                          gimbal->input_fault_latched_);
+      gimbal->UpdateFreshEpoch(INPUTS_VALID);
       gimbal->ApplyConsumedModeRequest(INPUTS_VALID);
-      gimbal->inputs_fresh_observed_ = INPUTS_VALID;
       if (!GimbalInputGuard::ControlAllowed(INPUTS_VALID,
                                             gimbal->input_fault_latched_)) {
         if (!INPUTS_VALID) {
@@ -527,13 +532,17 @@ class Gimbal : public LibXR::Application {
   bool last_submitted_yaw_torque_valid_ = false;
   ChassisMotionState chassis_motion_state_{};
   LibXR::Topic::TopicHandle chassis_motion_state_topic_;
-  LibXR::MPMCQueue<GimbalEvent> mode_requests_{4};
-  std::atomic_bool relax_requested_{false};
-  GimbalEvent pending_mode_request_ = GimbalEvent::SET_MODE_RELAX;
+  LibXR::MPMCQueue<GimbalModeRequest> mode_requests_{4};
+  std::atomic<uint32_t> request_sequence_{0U};
+  std::atomic<uint32_t> relax_sequence_{0U};
+  std::atomic<uint32_t> fresh_epoch_{0U};
+  GimbalModeRequest pending_mode_request_{GimbalEvent::SET_MODE_RELAX, 0U, 0U};
   bool pending_mode_request_valid_ = false;
-  bool pending_mode_request_rearm_eligible_ = false;
   bool pending_relax_request_ = false;
-  bool inputs_fresh_observed_ = false;
+  uint32_t last_relax_sequence_ = 0U;
+  bool relax_sequence_received_ = false;
+  uint32_t fresh_epoch_counter_ = 0U;
+  bool inputs_valid_last_cycle_ = false;
   LibXR::Thread thread_;
 
   /*----------工具函数--------------------------------*/
@@ -582,45 +591,57 @@ class Gimbal : public LibXR::Application {
   }
 
   void RequestMode(GimbalEvent gimbal_event) {
+    const uint32_t REQUEST_SEQUENCE = NextRequestSequence();
+    const uint32_t FRESH_EPOCH = fresh_epoch_.load(std::memory_order_acquire);
     if (gimbal_event == GimbalEvent::SET_MODE_RELAX) {
-      relax_requested_.store(true);
+      PublishRelaxSequence(REQUEST_SEQUENCE);
       return;
     }
 
-    const auto PUSH_RESULT = mode_requests_.Push(gimbal_event);
+    GimbalModeRequest request{gimbal_event, REQUEST_SEQUENCE, FRESH_EPOCH};
+    const auto PUSH_RESULT = mode_requests_.Push(request);
     if (PUSH_RESULT == LibXR::ErrorCode::FULL) {
-      GimbalEvent discarded_mode;
-      (void)mode_requests_.Pop(discarded_mode);
-      (void)mode_requests_.Push(gimbal_event);
+      GimbalModeRequest discarded_request;
+      (void)mode_requests_.Pop(discarded_request);
+      (void)mode_requests_.Push(request);
     }
   }
 
   void ConsumeModeRequests() {
-    const bool RELAX_REQUESTED = relax_requested_.exchange(false);
-    GimbalEvent latest_mode;
-    bool mode_request_available = false;
-    while (mode_requests_.Pop(latest_mode) == LibXR::ErrorCode::OK) {
-      pending_mode_request_ = latest_mode;
-      mode_request_available = true;
+    ConsumeRelaxSequence();
+
+    GimbalModeRequest latest_request = pending_mode_request_;
+    bool mode_request_available =
+        pending_mode_request_valid_ && RequestIsAfterRelax(latest_request);
+    pending_mode_request_valid_ = false;
+
+    GimbalModeRequest request;
+    while (mode_requests_.Pop(request) == LibXR::ErrorCode::OK) {
+      if (!RequestIsAfterRelax(request)) {
+        continue;
+      }
+      if (!mode_request_available ||
+          GimbalInputGuard::IsSequenceAfter(request.sequence,
+                                            latest_request.sequence)) {
+        latest_request = request;
+        mode_request_available = true;
+      }
     }
 
-    const bool LATE_RELAX_REQUESTED = relax_requested_.exchange(false);
-    if (RELAX_REQUESTED || LATE_RELAX_REQUESTED) {
-      pending_mode_request_valid_ = false;
-      pending_relax_request_ = true;
-      return;
+    ConsumeRelaxSequence();
+    if (mode_request_available && !RequestIsAfterRelax(latest_request)) {
+      mode_request_available = false;
     }
 
-    pending_relax_request_ = false;
+    pending_mode_request_ = latest_request;
     pending_mode_request_valid_ = mode_request_available;
-    pending_mode_request_rearm_eligible_ =
-        mode_request_available && inputs_fresh_observed_;
   }
 
   void ApplyConsumedModeRequest(bool inputs_valid) {
-    if (relax_requested_.exchange(false)) {
+    ConsumeRelaxSequence();
+    if (pending_mode_request_valid_ &&
+        !RequestIsAfterRelax(pending_mode_request_)) {
       pending_mode_request_valid_ = false;
-      pending_relax_request_ = true;
     }
     if (pending_relax_request_) {
       pending_relax_request_ = false;
@@ -632,15 +653,71 @@ class Gimbal : public LibXR::Application {
     }
 
     pending_mode_request_valid_ = false;
-    if (!GimbalInputGuard::ActiveRequestCanRearm(
-            pending_mode_request_rearm_eligible_, inputs_valid)) {
+    if (!GimbalInputGuard::RequestMatchesFreshEpoch(
+            pending_mode_request_.fresh_epoch,
+            fresh_epoch_.load(std::memory_order_acquire))) {
       return;
     }
     if (!GimbalInputGuard::AcceptActiveRequest(inputs_valid,
                                                input_fault_latched_)) {
       return;
     }
-    ApplyMode(pending_mode_request_);
+    ApplyMode(pending_mode_request_.mode);
+  }
+
+  uint32_t NextRequestSequence() {
+    uint32_t current = request_sequence_.load(std::memory_order_relaxed);
+    while (true) {
+      uint32_t next = current + 1U;
+      if (next == 0U) {
+        next = 1U;
+      }
+      if (request_sequence_.compare_exchange_weak(current, next,
+                                                  std::memory_order_relaxed,
+                                                  std::memory_order_relaxed)) {
+        return next;
+      }
+    }
+  }
+
+  void PublishRelaxSequence(uint32_t sequence) {
+    uint32_t current = relax_sequence_.load(std::memory_order_relaxed);
+    while ((current == 0U ||
+            GimbalInputGuard::IsSequenceAfter(sequence, current)) &&
+           !relax_sequence_.compare_exchange_weak(current, sequence,
+                                                  std::memory_order_release,
+                                                  std::memory_order_relaxed)) {
+    }
+  }
+
+  void ConsumeRelaxSequence() {
+    const uint32_t SEQUENCE =
+        relax_sequence_.exchange(0U, std::memory_order_acq_rel);
+    if (SEQUENCE == 0U ||
+        (relax_sequence_received_ &&
+         !GimbalInputGuard::IsSequenceAfter(SEQUENCE, last_relax_sequence_))) {
+      return;
+    }
+    last_relax_sequence_ = SEQUENCE;
+    relax_sequence_received_ = true;
+    pending_relax_request_ = true;
+  }
+
+  bool RequestIsAfterRelax(const GimbalModeRequest& request) const {
+    return !relax_sequence_received_ ||
+           GimbalInputGuard::IsSequenceAfter(request.sequence,
+                                             last_relax_sequence_);
+  }
+
+  void UpdateFreshEpoch(bool inputs_valid) {
+    if (inputs_valid && !inputs_valid_last_cycle_) {
+      ++fresh_epoch_counter_;
+      if (fresh_epoch_counter_ == 0U) {
+        fresh_epoch_counter_ = 1U;
+      }
+      fresh_epoch_.store(fresh_epoch_counter_, std::memory_order_release);
+    }
+    inputs_valid_last_cycle_ = inputs_valid;
   }
 
   void ControlYawMotor(const Motor::MotorCmd& command) {

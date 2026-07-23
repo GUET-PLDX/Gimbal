@@ -1,5 +1,6 @@
 import argparse
 import pathlib
+import re
 import subprocess
 import tempfile
 
@@ -10,27 +11,43 @@ parser.add_argument("--validator", required=True)
 args = parser.parse_args()
 
 source = pathlib.Path(args.header).read_text()
-needle = "gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);"
-if needle not in source:
-    raise SystemExit("fixture setup failed: RELAX callback request not found")
-mutated = source.replace(
-    needle, "gimbal->ApplyMode(GimbalEvent::SET_MODE_RELAX);", 1
+mutations = (
+    (
+        "callback direct ApplyMode",
+        r"gimbal->RequestMode\(GimbalEvent::SET_MODE_RELAX\);",
+        "gimbal->ApplyMode(GimbalEvent::SET_MODE_RELAX);",
+    ),
+    (
+        "callback epoch capture",
+        r"fresh_epoch_\.load\(std::memory_order_acquire\)",
+        "0U",
+    ),
+    (
+        "RELAX sequence cutoff",
+        r"GimbalInputGuard::IsSequenceAfter\(request\.sequence,\s*"
+        r"last_relax_sequence_\)",
+        "true",
+    ),
+    (
+        "late queued request discard",
+        r"if \(!RequestIsAfterRelax\(request\)\) \{\s*continue;\s*\}",
+        "if (false) { continue; }",
+    ),
 )
 
-with tempfile.TemporaryDirectory() as directory:
-    header = pathlib.Path(directory) / "Gimbal.hpp"
-    header.write_text(mutated)
-    result = subprocess.run(
-        ["python3", args.validator, "--header", str(header)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-if result.returncode == 0:
-    raise SystemExit("negative mutation passed: direct callback ApplyMode")
-diagnostic = result.stdout + result.stderr
-if "forbidden callback mutation" not in diagnostic:
-    raise SystemExit(f"negative mutation failed unexpectedly: {diagnostic.strip()}")
-
-print("DETECTED: callback direct ApplyMode mutation")
+for description, pattern, replacement in mutations:
+    mutated, count = re.subn(pattern, replacement, source, count=1, flags=re.S)
+    if count != 1:
+        raise SystemExit(f"fixture setup failed: {description}")
+    with tempfile.TemporaryDirectory() as directory:
+        header = pathlib.Path(directory) / "Gimbal.hpp"
+        header.write_text(mutated)
+        result = subprocess.run(
+            ["python3", args.validator, "--header", str(header)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    if result.returncode == 0:
+        raise SystemExit(f"negative mutation passed: {description}")
+    print(f"DETECTED: {description}")

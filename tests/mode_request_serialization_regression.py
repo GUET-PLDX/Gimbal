@@ -31,14 +31,21 @@ source = pathlib.Path(args.header).read_text()
 
 require(
     source,
-    r"LibXR::MPMCQueue<GimbalEvent>\s+mode_requests_\{4\}",
+    r"struct\s+GimbalModeRequest\s*\{.*?GimbalEvent\s+mode;.*?"
+    r"uint32_t\s+sequence;.*?uint32_t\s+fresh_epoch;.*?\};",
+    "sequenced epoch-capturing request payload",
+)
+require(
+    source,
+    r"LibXR::MPMCQueue<GimbalModeRequest>\s+mode_requests_\{4\}",
     "LibXR mode request queue",
 )
 require(
     source,
-    r"std::atomic_bool\s+relax_requested_\{false\}",
-    "non-droppable RELAX latch",
+    r"std::atomic<uint32_t>\s+relax_sequence_\{0U\}",
+    "non-droppable sequenced RELAX latch",
 )
+require(source, r"std::atomic<uint32_t>\s+fresh_epoch_\{0U\}", "fresh epoch barrier")
 require(source, r"void\s+RequestMode\(GimbalEvent gimbal_event\)", "RequestMode API")
 require(source, r"void\s+ConsumeModeRequests\(\)", "owner request consumer")
 require(source, r"void\s+ApplyMode\(GimbalEvent gimbal_event\)", "private mode mutator")
@@ -62,37 +69,45 @@ for callback in callbacks:
 request_body = method_body(source, r"void\s+RequestMode\(GimbalEvent gimbal_event\)")
 require(
     request_body,
+    r"const uint32_t REQUEST_SEQUENCE = NextRequestSequence\(\);.*?"
+    r"const uint32_t FRESH_EPOCH =\s*fresh_epoch_\.load\("
+    r"std::memory_order_acquire\);",
+    "callback-time sequence and epoch capture",
+)
+require(
+    request_body,
     r"if\s*\(gimbal_event == GimbalEvent::SET_MODE_RELAX\).*?"
-    r"relax_requested_\.store\(true\).*?return;",
+    r"PublishRelaxSequence\(REQUEST_SEQUENCE\).*?return;",
     "RELAX bypasses the bounded queue",
 )
-require(request_body, r"mode_requests_\.Push\(gimbal_event\)", "normal mode enqueue")
+require(
+    request_body,
+    r"GimbalModeRequest request\{gimbal_event, REQUEST_SEQUENCE, FRESH_EPOCH\};"
+    r".*?mode_requests_\.Push\(request\)",
+    "normal sequenced mode enqueue",
+)
 require(
     request_body,
     r"ErrorCode::FULL.*?mode_requests_\.Pop\(.*?\).*?"
-    r"mode_requests_\.Push\(gimbal_event\)",
+    r"mode_requests_\.Push\(request\)",
     "queue-full oldest replacement",
 )
 
 consume_body = method_body(source, r"void\s+ConsumeModeRequests\(\)")
 require(
     consume_body,
-    r"relax_requested_\.exchange\(false\).*?mode_requests_\.Pop",
+    r"ConsumeRelaxSequence\(\).*?mode_requests_\.Pop",
     "RELAX priority before queue drain",
 )
-require(
-    consume_body,
-    r"if\s*\(RELAX_REQUESTED.*?\).*?pending_mode_request_valid_ = false;.*?"
-    r"pending_relax_request_ = true;.*?return;",
-    "RELAX discards normal requests",
-)
+require(consume_body, r"ConsumeRelaxSequence\(\).*?ConsumeRelaxSequence\(\)",
+        "RELAX checked around queue drain")
 
 thread_body = method_body(source, r"static\s+void\s+ThreadFunc\(Gimbal\* gimbal\)")
 require(
     thread_body,
     r"while\s*\(true\)\s*\{\s*gimbal->ConsumeModeRequests\(\);.*?"
-    r"gimbal->Update\(\);.*?gimbal->ApplyConsumedModeRequest\(INPUTS_VALID\);"
-    r".*?gimbal->inputs_fresh_observed_ = INPUTS_VALID;.*?"
+    r"gimbal->Update\(\);.*?gimbal->UpdateFreshEpoch\(INPUTS_VALID\);.*?"
+    r"gimbal->ApplyConsumedModeRequest\(INPUTS_VALID\);.*?"
     r"gimbal->ParseCMD\(\);.*?gimbal->Control\(\);",
     "owner consumes first and applies against current-cycle inputs",
 )
@@ -109,7 +124,7 @@ apply_request_body = method_body(
 )
 require(
     apply_request_body,
-    r"relax_requested_\.exchange\(false\).*?if\s*\(pending_relax_request_\)",
+    r"ConsumeRelaxSequence\(\).*?if\s*\(pending_relax_request_\)",
     "late RELAX priority before active apply",
 )
 require(
@@ -120,17 +135,32 @@ require(
 )
 require(
     apply_request_body,
-    r"ActiveRequestCanRearm\(\s*pending_mode_request_rearm_eligible_,\s*"
-    r"inputs_valid\).*?AcceptActiveRequest\(inputs_valid,\s*"
+    r"RequestMatchesFreshEpoch\(\s*pending_mode_request_\.fresh_epoch,\s*"
+    r"fresh_epoch_\.load\(std::memory_order_acquire\)\).*?"
+    r"AcceptActiveRequest\(inputs_valid,\s*"
     r"input_fault_latched_\).*?"
-    r"ApplyMode\(pending_mode_request_\)",
+    r"ApplyMode\(pending_mode_request_\.mode\)",
     "owner-only fresh active rearm",
+)
+request_cutoff_body = method_body(
+    source, r"bool\s+RequestIsAfterRelax\(const GimbalModeRequest& request\) const"
+)
+require(
+    request_cutoff_body,
+    r"IsSequenceAfter\(request\.sequence,\s*last_relax_sequence_\)",
+    "late queued request RELAX cutoff",
 )
 require(
     consume_body,
-    r"pending_mode_request_rearm_eligible_ =\s*"
-    r"mode_request_available && inputs_fresh_observed_;",
-    "post-fresh request eligibility snapshot",
+    r"while\s*\(mode_requests_\.Pop\(request\).*?"
+    r"if\s*\(!RequestIsAfterRelax\(request\)\)\s*\{\s*continue;",
+    "late queued request discard",
+)
+require(
+    source,
+    r"if\s*\(inputs_valid && !inputs_valid_last_cycle_\).*?"
+    r"fresh_epoch_\.store\(.*?std::memory_order_release\);",
+    "owner fresh epoch publication",
 )
 
 if "SetMode(" in source:
