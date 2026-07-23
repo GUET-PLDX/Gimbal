@@ -5,6 +5,21 @@ import re
 import yaml
 
 
+MODULE_ROOT = pathlib.Path(__file__).resolve().parent.parent
+ROOT = MODULE_ROOT.parent.parent
+PATROL_KEYS = (
+    "patrol_pitch_amplitude_rad",
+    "patrol_pitch_angular_rate_rad_s",
+    "patrol_yaw_rate_rad_s",
+)
+PATROL_VALUES = {
+    "patrol_pitch_amplitude_rad": 0.455,
+    "patrol_pitch_angular_rate_rad_s": 10.0,
+    "patrol_yaw_rate_rad_s": 1.0,
+}
+LEGACY_PATROL_KEYS = {"patrol_range", "patrol_omega"}
+
+
 EXPECTED_FIELDS = (
     "b_nms_rad",
     "k_theta",
@@ -61,9 +76,11 @@ EXPECTED_DEFAULTS = {
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--header", required=True)
-parser.add_argument("--algorithm", required=True)
-parser.add_argument("--config")
+parser.add_argument("--header", default=MODULE_ROOT / "Gimbal.hpp")
+parser.add_argument("--algorithm", default=MODULE_ROOT / "YawLqrEso.hpp")
+parser.add_argument(
+    "--config", default=ROOT / "User/RobotConfig/sentry_gimbal.yaml"
+)
 parser.add_argument("--generated")
 parser.add_argument("--header-only", action="store_true")
 args = parser.parse_args()
@@ -97,6 +114,11 @@ if any(not isinstance(item, dict) or len(item) != 1 for item in manifest_args):
 manifest_names = [next(iter(item)) for item in manifest_args]
 if "referee" in manifest_names:
     raise SystemExit("unused Referee parameter remains in Gimbal manifest")
+if LEGACY_PATROL_KEYS & set(manifest_names):
+    raise SystemExit("legacy patrol parameters remain in Gimbal manifest")
+patrol_start = manifest_names.index("yaw_zero") + 1
+if tuple(manifest_names[patrol_start : patrol_start + len(PATROL_KEYS)]) != PATROL_KEYS:
+    raise SystemExit("patrol constructor order mismatch")
 pid_yaw_omega = next(
     item["pid_yaw_omega"] for item in manifest_args if "pid_yaw_omega" in item
 )
@@ -134,6 +156,11 @@ if not args.header_only:
     gimbal_args = gimbal["constructor_args"]
     if "referee" in gimbal_args:
         raise SystemExit("unused Referee parameter remains in Gimbal YAML")
+    if LEGACY_PATROL_KEYS & set(gimbal_args):
+        raise SystemExit("legacy patrol parameters remain in target YAML")
+    for key, expected_value in PATROL_VALUES.items():
+        if gimbal_args.get(key) != expected_value:
+            raise SystemExit(f"target YAML patrol value mismatch: {key}")
     if "ai_yaw_lqr_eso_enable" in gimbal_args:
         raise SystemExit("removed route master remains in target YAML")
     yaw_yaml = gimbal_args["yaw_lqr_eso"]

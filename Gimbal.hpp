@@ -49,8 +49,9 @@ constructor_args:
   - j_yaw: 0.0
   - pit_zero: 0.0
   - yaw_zero: 0.0
-  - patrol_range: 0.0
-  - patrol_omega: 0.0
+  - patrol_pitch_amplitude_rad: 0.0
+  - patrol_pitch_angular_rate_rad_s: 0.0
+  - patrol_yaw_rate_rad_s: 0.0
   - pit_reverse_flag: false
   - thread_priority: LibXR::Thread::Priority::MEDIUM
   - rotor_ff_enabled: false
@@ -93,6 +94,7 @@ depends:
 #include "CMD.hpp"
 #include "ChassisMotionState.hpp"
 #include "Motor.hpp"
+#include "PatrolTrajectory.hpp"
 #include "YawLqrEso.hpp"
 #include "app_framework.hpp"
 #include "cycle_value.hpp"
@@ -136,6 +138,9 @@ class Gimbal : public LibXR::Application {
    * @param j_yaw Yaw轴转动惯量
    * @param pit_zero Pitch轴零点
    * @param yaw_zero Yaw轴零点
+   * @param patrol_pitch_amplitude_rad 巡逻Pitch幅度(rad)
+   * @param patrol_pitch_angular_rate_rad_s 巡逻Pitch角频率(rad/s)
+   * @param patrol_yaw_rate_rad_s 巡逻Yaw角速度(rad/s)
    * @param reverse_flag Pitch轴反转标志
    * @param rotor_ff_enabled
    *
@@ -150,7 +155,9 @@ class Gimbal : public LibXR::Application {
       LibXR::PID<float>::Param pid_pit_omega, Motor* motor_pit,
       Motor* motor_yaw, float pit_max_angle, float pit_min_angle, float pit_lc,
       float pit_theta, float yaw_k, float j_pit, float j_yaw, float pit_zero,
-      float yaw_zero, float patrol_range, float patrol_omega, bool reverse_flag,
+      float yaw_zero, float patrol_pitch_amplitude_rad,
+      float patrol_pitch_angular_rate_rad_s, float patrol_yaw_rate_rad_s,
+      bool reverse_flag,
       LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,
       bool rotor_ff_enabled = false, YawLqrEso::Config yaw_lqr_eso = {})
       : cmd_(cmd),
@@ -169,8 +176,9 @@ class Gimbal : public LibXR::Application {
         j_yaw_(j_yaw),
         pit_zero_(pit_zero),
         yaw_zero_(yaw_zero),
-        patrol_range_(patrol_range),
-        patrol_omega_(patrol_omega),
+        patrol_pitch_amplitude_rad_(patrol_pitch_amplitude_rad),
+        patrol_pitch_angular_rate_rad_s_(patrol_pitch_angular_rate_rad_s),
+        patrol_yaw_rate_rad_s_(patrol_yaw_rate_rad_s),
         reverse_flag_(reverse_flag ? 1.0f : -1.0f),
         rotor_ff_enabled_(rotor_ff_enabled),
         yaw_lqr_eso_config_(yaw_lqr_eso),
@@ -305,11 +313,14 @@ class Gimbal : public LibXR::Application {
       target_pit_dot_ = cmd_data_.pit_dot;
       target_pit_ddot_ = cmd_data_.pit_ddot;
     } else if (!OPERATOR_CONTROL && AUTOPATROL) {
-      target_pit_cmd_ -=
-          patrol_range_ * (2 / M_PI) *
-          asin(sin(patrol_omega_ *
-                   (LibXR::Timebase::GetMilliseconds() - patrol_start_time))) /
+      const float ELAPSED_S =
+          static_cast<float>(
+              (LibXR::Timebase::GetMilliseconds() - patrol_start_time_)
+                  .ToMillisecond()) /
           1000.0f;
+      target_pit_cmd_ = PatrolTrajectory::PitchTarget(
+          patrol_pitch_center_rad_, patrol_pitch_amplitude_rad_,
+          patrol_pitch_angular_rate_rad_s_, ELAPSED_S);
       target_pit_dot_ = 0.0f;
       target_pit_ddot_ = 0.0f;
     } else {
@@ -333,8 +344,8 @@ class Gimbal : public LibXR::Application {
       target_yaw_cmd_ += YAW_OPERATOR_RATE * dt_;
       target_yaw_dot_ = YAW_OPERATOR_RATE;
     } else if (AUTOPATROL) {
-      target_yaw_cmd_ += 1.0f * dt_;
-      target_yaw_dot_ = 1.0f;
+      target_yaw_cmd_ += patrol_yaw_rate_rad_s_ * dt_;
+      target_yaw_dot_ = patrol_yaw_rate_rad_s_;
     } else {
       const float YAW_OPERATOR_RATE = -cmd_data_.yaw * GIMBAL_MAX_SPEED;
       target_yaw_cmd_ += YAW_OPERATOR_RATE * dt_;
@@ -431,8 +442,10 @@ class Gimbal : public LibXR::Application {
   float j_yaw_ = 0.0f;
   LibXR::CycleValue<float> pit_zero_ = 0.0f;
   LibXR::CycleValue<float> yaw_zero_ = 0.0f;
-  float patrol_range_ = 0.0f;
-  float patrol_omega_ = 0.0f;
+  float patrol_pitch_amplitude_rad_ = 0.0f;
+  float patrol_pitch_angular_rate_rad_s_ = 0.0f;
+  float patrol_yaw_rate_rad_s_ = 0.0f;
+  float patrol_pitch_center_rad_ = 0.0f;
   float target_pit_cmd_ = 0.0f;
   LibXR::CycleValue<float> target_yaw_cmd_ = 0.0f;
   float abs_angle_yaw_ = 0.0f;
@@ -440,7 +453,7 @@ class Gimbal : public LibXR::Application {
   float last_pit_angle_loop_omega_ = 0.0f;
   float last_yaw_angle_loop_omega_ = 0.0f;
   float reverse_flag_ = 1.0f;
-  LibXR::MillisecondTimestamp patrol_start_time = 0.0f;
+  LibXR::MillisecondTimestamp patrol_start_time_ = 0.0f;
   float dt_ = 0.0f;
   LibXR::MicrosecondTimestamp last_online_time_;
   bool rotor_ff_enabled_ = false;
@@ -631,7 +644,8 @@ class Gimbal : public LibXR::Application {
     target_pit_cmd_ = euler_.Pitch();
     target_yaw_cmd_ = euler_.Yaw();
     if (gimbal_event == GimbalEvent::SET_MODE_AUTOPATROL) {
-      patrol_start_time = LibXR::Timebase::GetMilliseconds();
+      patrol_pitch_center_rad_ = target_pit_cmd_;
+      patrol_start_time_ = LibXR::Timebase::GetMilliseconds();
     }
   }
 };

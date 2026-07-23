@@ -162,8 +162,8 @@ need_set_mode \
   'if \(RELAX\) \{\s*motor_yaw_->Disable\(\);\s*motor_pit_->Disable\(\);\s*target_pit_cmd_ = 0\.0f;\s*target_yaw_cmd_ = 0\.0f;\s*return;\s*\}\s*target_pit_cmd_ = euler_\.Pitch\(\);\s*target_yaw_cmd_ = euler_\.Yaw\(\);' \
   'RELAX returns after clearing targets before tracking modes anchor attitude'
 need_set_mode \
-  'if \(gimbal_event == GimbalEvent::SET_MODE_AUTOPATROL\) \{\s*patrol_start_time = LibXR::Timebase::GetMilliseconds\(\);\s*\}' \
-  'AUTOPATROL records its start time'
+  'if \(gimbal_event == GimbalEvent::SET_MODE_AUTOPATROL\) \{\s*patrol_pitch_center_rad_ = target_pit_cmd_;\s*patrol_start_time_ = LibXR::Timebase::GetMilliseconds\(\);\s*\}' \
+  'AUTOPATROL records its Pitch center and start time'
 
 if [[ "$MODE" != "core" ]]; then
   need 'target_yaw_dot_ = YAW_OPERATOR_RATE' 'manual Yaw rate feedforward'
@@ -171,6 +171,12 @@ if [[ "$MODE" != "core" ]]; then
 fi
 
 need 'rotor_ff_enabled: false' 'default-disabled rotor feedforward manifest'
+need '#include "PatrolTrajectory.hpp"' 'bounded patrol trajectory include'
+need 'patrol_pitch_amplitude_rad: 0\.0' 'SI Pitch patrol amplitude manifest key'
+need 'patrol_pitch_angular_rate_rad_s: 0\.0' \
+  'SI Pitch patrol angular-rate manifest key'
+need 'patrol_yaw_rate_rad_s: 0\.0' 'SI Yaw patrol rate manifest key'
+forbid 'patrol_range|patrol_omega' 'legacy patrol configuration names'
 forbid '  - pldx/Referee|#include "Referee.hpp"|Referee\* referee|referee_|referee:' \
   'unused Referee interface dependency'
 forbid '#include <cstdlib>|#include <cstring>|#define UI_GIMBAL_LAYER' \

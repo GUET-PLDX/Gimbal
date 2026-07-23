@@ -180,9 +180,11 @@ PITCH_RATE = (
     r"target_pit_dot_ = PIT_OPERATOR_RATE; target_pit_ddot_ = 0\.0f;"
 )
 PATROL_PITCH = (
-    r"target_pit_cmd_ -= patrol_range_ \* \(2 / M_PI\) \* "
-    r"asin\(sin\(patrol_omega_ \* \(LibXR::Timebase::GetMilliseconds\(\) - "
-    r"patrol_start_time\)\)\) / 1000\.0f; target_pit_dot_ = 0\.0f; "
+    r"const float ELAPSED_S = static_cast<float>\(\s*\(LibXR::Timebase::GetMilliseconds\(\) - "
+    r"patrol_start_time_\)\s*\.ToMillisecond\(\)\) / 1000\.0f; "
+    r"target_pit_cmd_ = PatrolTrajectory::PitchTarget\(\s*patrol_pitch_center_rad_, "
+    r"patrol_pitch_amplitude_rad_, patrol_pitch_angular_rate_rad_s_, ELAPSED_S\); "
+    r"target_pit_dot_ = 0\.0f; "
     r"target_pit_ddot_ = 0\.0f;"
 )
 YAW_RATE = (
@@ -237,7 +239,7 @@ def characterize(source):
     patrol_yaw = following_else(yaw_tail, operator_yaw)
     if patrol_yaw.condition != "AUTOPATROL":
         raise CharacterizationError("missing: patrol Yaw branch condition")
-    require("patrol Yaw behavior", r"target_yaw_cmd_ \+= 1\.0f \* dt_; target_yaw_dot_ = 1\.0f;", patrol_yaw.body)
+    require("patrol Yaw behavior", r"target_yaw_cmd_ \+= patrol_yaw_rate_rad_s_ \* dt_; target_yaw_dot_ = patrol_yaw_rate_rad_s_;", patrol_yaw.body)
     automatic_yaw = following_else(yaw_tail, patrol_yaw)
     require(
         "non-AI automatic Yaw behavior",
@@ -248,7 +250,7 @@ def characterize(source):
         raise CharacterizationError("missing: unconditional shared Yaw acceleration reset")
 
     pitch_writes = [("cmd", "="), ("dot", "="), ("ddot", "="),
-                    ("cmd", "-="), ("dot", "="), ("ddot", "="),
+                    ("cmd", "="), ("dot", "="), ("ddot", "="),
                     ("cmd", "+="), ("dot", "="), ("ddot", "=")]
     yaw_writes = [("cmd", "+="), ("dot", "="), ("cmd", "+="),
                   ("dot", "="), ("cmd", "+="), ("dot", "="), ("ddot", "=")]
@@ -263,7 +265,7 @@ def characterize(source):
 MUTATIONS = (
     Mutation("operator Pitch low sensitivity", "OPERATOR_CONTROL && LOW_SENSITIVITY ? 0.1f : 1.0f", "OPERATOR_CONTROL && LOW_SENSITIVITY ? 0.2f : 1.0f", "missing: operator and non-AI automatic Pitch behavior"),
     Mutation("operator Pitch normal formula", "cmd_data_.pit * GIMBAL_MAX_SPEED * PITCH_SENSITIVITY", "cmd_data_.pit * PITCH_SENSITIVITY", "missing: operator and non-AI automatic Pitch behavior"),
-    Mutation("patrol Pitch sign", "target_pit_cmd_ -=", "target_pit_cmd_ +=", "missing: patrol Pitch behavior"),
+    Mutation("patrol Pitch absolute target", "target_pit_cmd_ = PatrolTrajectory::PitchTarget(", "target_pit_cmd_ += PatrolTrajectory::PitchTarget(", "missing: patrol Pitch behavior"),
     Mutation("AI Pitch branch", "if (AI_YAW_ACTIVE) {", "if (!AI_YAW_ACTIVE) {", "missing: AI absolute Pitch behavior", "first"),
     Mutation("non-AI automatic Pitch usage", "target_pit_dot_ = PIT_OPERATOR_RATE;", "target_pit_dot_ = -PIT_OPERATOR_RATE;", "missing: operator and non-AI automatic Pitch behavior"),
     Mutation("AI Yaw bypass", "if (AI_YAW_ACTIVE) {", "if (!AI_YAW_ACTIVE) {", "missing: AI Yaw bypass", "last"),
@@ -271,7 +273,7 @@ MUTATIONS = (
     Mutation("operator Yaw low sensitivity", "LOW_SENSITIVITY ? 0.1f : 1.0f", "LOW_SENSITIVITY ? 0.2f : 1.0f", "missing: operator Yaw low and normal sensitivity behavior", "last"),
     Mutation("operator Yaw usage", "target_yaw_dot_ = YAW_OPERATOR_RATE;", "target_yaw_dot_ = -YAW_OPERATOR_RATE;", "missing: operator Yaw low and normal sensitivity behavior", "first"),
     Mutation("extra operator Yaw target write", "target_yaw_dot_ = YAW_OPERATOR_RATE;", "target_yaw_dot_ = YAW_OPERATOR_RATE;\n      ++target_yaw_cmd_;", "missing: exact phased Yaw target writes", "first"),
-    Mutation("patrol Yaw", "target_yaw_dot_ = 1.0f;", "target_yaw_dot_ = 2.0f;", "missing: patrol Yaw behavior"),
+    Mutation("patrol Yaw", "target_yaw_dot_ = patrol_yaw_rate_rad_s_;", "target_yaw_dot_ = 2.0f;", "missing: patrol Yaw behavior"),
     Mutation("automatic Yaw sign", "-cmd_data_.yaw * GIMBAL_MAX_SPEED", "cmd_data_.yaw * GIMBAL_MAX_SPEED", "missing: non-AI automatic Yaw behavior"),
     Mutation("automatic Yaw usage", "target_yaw_dot_ = YAW_OPERATOR_RATE;", "target_yaw_dot_ = -YAW_OPERATOR_RATE;", "missing: non-AI automatic Yaw behavior", "last"),
     Mutation("shared Yaw acceleration reset", "target_yaw_ddot_ = 0.0f;\n  }", "if (OPERATOR_CONTROL) {\n      target_yaw_ddot_ = 0.0f;\n    }\n  }", "missing: unconditional shared Yaw acceleration reset"),
