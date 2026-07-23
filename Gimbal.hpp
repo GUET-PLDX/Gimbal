@@ -93,6 +93,7 @@ depends:
 
 #include "CMD.hpp"
 #include "ChassisMotionState.hpp"
+#include "GimbalInputGuard.hpp"
 #include "Motor.hpp"
 #include "PatrolTrajectory.hpp"
 #include "YawLqrEso.hpp"
@@ -108,6 +109,7 @@ depends:
 
 static constexpr float GIMBAL_MAX_SPEED =
     static_cast<float>(LibXR::TWO_PI) * 2.0f;
+static constexpr uint32_t IMU_TIMEOUT_US = 50000U;
 enum class GimbalEvent : uint8_t {
   SET_MODE_RELAX,
   SET_MODE_COMMON,
@@ -252,13 +254,34 @@ class Gimbal : public LibXR::Application {
         cmd_suber.StartWaiting();
       }
       if (euler_suber.Available()) {
-        gimbal->euler_ = euler_suber.GetData();
-        gimbal->euler_.Pitch() *= -1.0f;
+        const uint32_t EULER_SAMPLE_TIMESTAMP = static_cast<uint32_t>(
+            static_cast<uint64_t>(euler_suber.GetTimestamp()));
+        auto euler_sample = euler_suber.GetData();
+        if (GimbalInputGuard::AllFinite({euler_sample.Roll(),
+                                         euler_sample.Pitch(),
+                                         euler_sample.Yaw()})) {
+          euler_sample.Pitch() *= -1.0f;
+          gimbal->euler_ = euler_sample;
+          gimbal->last_euler_rx_us_ = EULER_SAMPLE_TIMESTAMP;
+          gimbal->euler_received_ = true;
+        } else {
+          gimbal->euler_received_ = false;
+        }
         euler_suber.StartWaiting();
       }
       if (gyro_suber.Available()) {
-        gimbal->gyro_data_ = gyro_suber.GetData();
-        gimbal->gyro_data_.y() *= -1.0f;
+        const uint32_t GYRO_SAMPLE_TIMESTAMP = static_cast<uint32_t>(
+            static_cast<uint64_t>(gyro_suber.GetTimestamp()));
+        auto gyro_sample = gyro_suber.GetData();
+        if (GimbalInputGuard::AllFinite(
+                {gyro_sample.x(), gyro_sample.y(), gyro_sample.z()})) {
+          gyro_sample.y() *= -1.0f;
+          gimbal->gyro_data_ = gyro_sample;
+          gimbal->last_gyro_rx_us_ = GYRO_SAMPLE_TIMESTAMP;
+          gimbal->gyro_received_ = true;
+        } else {
+          gimbal->gyro_received_ = false;
+        }
         gyro_suber.StartWaiting();
       }
       if (chassis_motion_state_suber.Available()) {
@@ -267,6 +290,25 @@ class Gimbal : public LibXR::Application {
       }
 
       gimbal->Update();
+      const uint32_t NOW_US = static_cast<uint32_t>(
+          static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds()));
+      const bool IMU_VALID =
+          gimbal->euler_received_ && gimbal->gyro_received_ &&
+          GimbalInputGuard::IsFresh(gimbal->last_euler_rx_us_, NOW_US,
+                                    IMU_TIMEOUT_US) &&
+          GimbalInputGuard::IsFresh(gimbal->last_gyro_rx_us_, NOW_US,
+                                    IMU_TIMEOUT_US) &&
+          GimbalInputGuard::AllFinite(
+              {gimbal->euler_.Roll(), gimbal->euler_.Pitch(),
+               gimbal->euler_.Yaw(), gimbal->gyro_data_.x(),
+               gimbal->gyro_data_.y(), gimbal->gyro_data_.z()});
+      gimbal->imu_input_valid_ = IMU_VALID;
+      if (!gimbal->motor_feedback_online_ || !IMU_VALID) {
+        gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
+        gimbal->Control();
+        LibXR::Thread::Sleep(2);
+        continue;
+      }
       gimbal->ParseCMD();
       gimbal->Control();
       LibXR::Thread::Sleep(2);
@@ -358,21 +400,18 @@ class Gimbal : public LibXR::Application {
    * @brief 云台控制计算与输出
    */
   void Control() {
-    if (!motor_feedback_online_) {
-      // 反馈离线时立即切松弛，避免继续使用旧反馈闭环输出。
+    if (!motor_feedback_online_ || !imu_input_valid_) {
+      // 反馈无效时立即切松弛，避免继续使用旧反馈闭环输出。
       SetMode(GimbalEvent::SET_MODE_RELAX);
+      SubmitRelaxOutput();
+      return;
     }
 
     float pit_output = 0.0f;
     float yaw_output = 0.0f;
 
     if (current_mode_ == GimbalEvent::SET_MODE_RELAX) {
-      pid_pit_omega_.SetFeedForward(0.0f);
-      pid_yaw_omega_.SetFeedForward(0.0f);
-      last_pit_angle_loop_omega_ = 0.0f;
-      last_yaw_angle_loop_omega_ = 0.0f;
-      motor_yaw_->Relax();
-      motor_pit_->Relax();
+      SubmitRelaxOutput();
       return;
     }
 
@@ -416,10 +455,15 @@ class Gimbal : public LibXR::Application {
   Motor::Feedback motor_yaw_feedback_;
   Motor::Feedback motor_pit_feedback_;
   bool motor_feedback_online_ = true;
+  bool imu_input_valid_ = false;
 
   CMD::GimbalCMD cmd_data_;
   Eigen::Matrix<float, 3, 1> gyro_data_;
   LibXR::EulerAngle<float> euler_;
+  uint32_t last_euler_rx_us_ = 0U;
+  uint32_t last_gyro_rx_us_ = 0U;
+  bool euler_received_ = false;
+  bool gyro_received_ = false;
 
   LibXR::Event gimbal_event_;
   GimbalEvent current_mode_ = GimbalEvent::SET_MODE_RELAX;
@@ -501,6 +545,15 @@ class Gimbal : public LibXR::Application {
   void ClearSubmittedYawTorqueLedger() {
     last_submitted_yaw_torque_nm_ = 0.0f;
     last_submitted_yaw_torque_valid_ = false;
+  }
+
+  void SubmitRelaxOutput() {
+    pid_pit_omega_.SetFeedForward(0.0f);
+    pid_yaw_omega_.SetFeedForward(0.0f);
+    last_pit_angle_loop_omega_ = 0.0f;
+    last_yaw_angle_loop_omega_ = 0.0f;
+    motor_yaw_->Relax();
+    motor_pit_->Relax();
   }
 
   void ControlYawMotor(const Motor::MotorCmd& command) {

@@ -84,8 +84,33 @@ need_state 'ChassisMotionMode mode = ChassisMotionMode::NON_ROTOR' \
   'non-rotor default chassis mode'
 
 forbid 'CONTROL_DT_(MIN|MAX)|dt_valid_' 'control period validity guard'
-forbid 'IMU_TIMEOUT_US|imu_online_|euler_received_|gyro_received_' \
-  'IMU freshness guard'
+need '#include "GimbalInputGuard.hpp"' 'Gimbal input guard include'
+need 'static constexpr uint32_t IMU_TIMEOUT_US = 50000U' \
+  'exact 50000 us IMU timeout'
+need 'uint32_t last_euler_rx_us_ = 0U' 'independent Euler receive timestamp'
+need 'uint32_t last_gyro_rx_us_ = 0U' 'independent gyro receive timestamp'
+need 'bool euler_received_ = false' 'explicit Euler sample presence'
+need 'bool gyro_received_ = false' 'explicit gyro sample presence'
+need_multiline \
+  '(?s)euler_suber\.Available\(\).*EULER_SAMPLE_TIMESTAMP.*euler_suber\.GetTimestamp\(\).*euler_sample.*euler_suber\.GetData\(\).*AllFinite\(\s*\{\s*euler_sample\.Roll\(\),\s*euler_sample\.Pitch\(\),\s*euler_sample\.Yaw\(\)\}\).*euler_ = euler_sample;.*last_euler_rx_us_ = EULER_SAMPLE_TIMESTAMP;.*euler_received_ = true;.*else \{\s*gimbal->euler_received_ = false;' \
+  'Euler sample is validated before independently refreshing freshness state'
+need_multiline \
+  '(?s)gyro_suber\.Available\(\).*GYRO_SAMPLE_TIMESTAMP.*gyro_suber\.GetTimestamp\(\).*gyro_sample.*gyro_suber\.GetData\(\).*AllFinite\(\s*\{gyro_sample\.x\(\), gyro_sample\.y\(\), gyro_sample\.z\(\)\}\).*gyro_data_ = gyro_sample;.*last_gyro_rx_us_ = GYRO_SAMPLE_TIMESTAMP;.*gyro_received_ = true;.*else \{\s*gimbal->gyro_received_ = false;' \
+  'gyro sample is validated before independently refreshing freshness state'
+need_multiline \
+  '(?s)const bool IMU_VALID =\s*gimbal->euler_received_ && gimbal->gyro_received_ &&\s*GimbalInputGuard::IsFresh\(gimbal->last_euler_rx_us_, NOW_US,\s*IMU_TIMEOUT_US\) &&\s*GimbalInputGuard::IsFresh\(gimbal->last_gyro_rx_us_, NOW_US,\s*IMU_TIMEOUT_US\) &&\s*GimbalInputGuard::AllFinite\(\s*\{gimbal->euler_\.Roll\(\), gimbal->euler_\.Pitch\(\),\s*gimbal->euler_\.Yaw\(\), gimbal->gyro_data_\.x\(\),\s*gimbal->gyro_data_\.y\(\), gimbal->gyro_data_\.z\(\)\}\);' \
+  'Euler and gyro freshness and finite values form one validity gate'
+need_multiline \
+  '(?s)if \(!gimbal->motor_feedback_online_ \|\| !IMU_VALID\) \{\s*gimbal->SetMode\(GimbalEvent::SET_MODE_RELAX\);\s*gimbal->Control\(\);\s*LibXR::Thread::Sleep\(2\);\s*continue;\s*\}\s*gimbal->ParseCMD\(\);\s*gimbal->Control\(\);' \
+  'owner loop relaxes and returns before parsing or active control on invalid input'
+need_before 'if \(!gimbal->motor_feedback_online_ \|\| !IMU_VALID\)' \
+  'gimbal->ParseCMD\(\)' 'input gate precedes ParseCMD'
+need_multiline \
+  '(?s)void Control\(\) \{\s*if \(!motor_feedback_online_ \|\| !imu_input_valid_\) \{.*SetMode\(GimbalEvent::SET_MODE_RELAX\);\s*SubmitRelaxOutput\(\);\s*return;\s*\}.*if \(current_mode_ == GimbalEvent::SET_MODE_RELAX\) \{\s*SubmitRelaxOutput\(\);\s*return;\s*\}.*Solve\(pit_output, yaw_output\);' \
+  'Control cannot reach Solve when motor or IMU input is invalid'
+need_multiline \
+  '(?s)void SubmitRelaxOutput\(\) \{.*pid_pit_omega_\.SetFeedForward\(0\.0f\);.*pid_yaw_omega_\.SetFeedForward\(0\.0f\);.*last_pit_angle_loop_omega_ = 0\.0f;.*last_yaw_angle_loop_omega_ = 0\.0f;.*motor_yaw_->Relax\(\);\s*motor_pit_->Relax\(\);\s*\}' \
+  'shared RELAX path clears controller state and submits zero output'
 need 'last_pit_angle_loop_omega_' 'Pitch angle-loop history'
 need 'last_yaw_angle_loop_omega_' 'Yaw angle-loop history'
 need 'pid_pit_omega_\.SetFeedForward' 'Pitch LibXR feedforward'
