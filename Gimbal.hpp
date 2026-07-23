@@ -262,15 +262,15 @@ class Gimbal : public LibXR::Application {
         cmd_suber.StartWaiting();
       }
       if (euler_suber.Available()) {
-        const uint32_t EULER_SAMPLE_TIMESTAMP = static_cast<uint32_t>(
-            static_cast<uint64_t>(euler_suber.GetTimestamp()));
+        const LibXR::MicrosecondTimestamp EULER_SAMPLE_TIMESTAMP =
+            euler_suber.GetTimestamp();
         auto euler_sample = euler_suber.GetData();
         if (GimbalInputGuard::AllFinite({euler_sample.Roll(),
                                          euler_sample.Pitch(),
                                          euler_sample.Yaw()})) {
           euler_sample.Pitch() *= -1.0f;
           gimbal->euler_ = euler_sample;
-          gimbal->last_euler_rx_us_ = EULER_SAMPLE_TIMESTAMP;
+          gimbal->last_euler_rx_time_ = EULER_SAMPLE_TIMESTAMP;
           gimbal->euler_received_ = true;
         } else {
           gimbal->euler_received_ = false;
@@ -278,14 +278,14 @@ class Gimbal : public LibXR::Application {
         euler_suber.StartWaiting();
       }
       if (gyro_suber.Available()) {
-        const uint32_t GYRO_SAMPLE_TIMESTAMP = static_cast<uint32_t>(
-            static_cast<uint64_t>(gyro_suber.GetTimestamp()));
+        const LibXR::MicrosecondTimestamp GYRO_SAMPLE_TIMESTAMP =
+            gyro_suber.GetTimestamp();
         auto gyro_sample = gyro_suber.GetData();
         if (GimbalInputGuard::AllFinite(
                 {gyro_sample.x(), gyro_sample.y(), gyro_sample.z()})) {
           gyro_sample.y() *= -1.0f;
           gimbal->gyro_data_ = gyro_sample;
-          gimbal->last_gyro_rx_us_ = GYRO_SAMPLE_TIMESTAMP;
+          gimbal->last_gyro_rx_time_ = GYRO_SAMPLE_TIMESTAMP;
           gimbal->gyro_received_ = true;
         } else {
           gimbal->gyro_received_ = false;
@@ -298,14 +298,14 @@ class Gimbal : public LibXR::Application {
       }
 
       gimbal->Update();
-      const uint32_t NOW_US = static_cast<uint32_t>(
-          static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds()));
+      const LibXR::MicrosecondTimestamp NOW =
+          LibXR::Timebase::GetMicroseconds();
       const bool IMU_VALID =
           gimbal->euler_received_ && gimbal->gyro_received_ &&
-          GimbalInputGuard::IsFresh(gimbal->last_euler_rx_us_, NOW_US,
-                                    IMU_TIMEOUT_US) &&
-          GimbalInputGuard::IsFresh(gimbal->last_gyro_rx_us_, NOW_US,
-                                    IMU_TIMEOUT_US) &&
+          (NOW - gimbal->last_euler_rx_time_).ToMicrosecond() <=
+              IMU_TIMEOUT_US &&
+          (NOW - gimbal->last_gyro_rx_time_).ToMicrosecond() <=
+              IMU_TIMEOUT_US &&
           GimbalInputGuard::AllFinite(
               {gimbal->euler_.Roll(), gimbal->euler_.Pitch(),
                gimbal->euler_.Yaw(), gimbal->gyro_data_.x(),
@@ -483,8 +483,8 @@ class Gimbal : public LibXR::Application {
   CMD::GimbalCMD cmd_data_;
   Eigen::Matrix<float, 3, 1> gyro_data_;
   LibXR::EulerAngle<float> euler_;
-  uint32_t last_euler_rx_us_ = 0U;
-  uint32_t last_gyro_rx_us_ = 0U;
+  LibXR::MicrosecondTimestamp last_euler_rx_time_;
+  LibXR::MicrosecondTimestamp last_gyro_rx_time_;
   bool euler_received_ = false;
   bool gyro_received_ = false;
 
@@ -536,13 +536,10 @@ class Gimbal : public LibXR::Application {
   std::atomic<uint32_t> request_sequence_{0U};
   std::atomic<uint32_t> relax_sequence_{0U};
   std::atomic<uint32_t> fresh_epoch_{0U};
+  GimbalInputGuard::ModeProtocol mode_protocol_;
   GimbalModeRequest pending_mode_request_{GimbalEvent::SET_MODE_RELAX, 0U, 0U};
   bool pending_mode_request_valid_ = false;
   bool pending_relax_request_ = false;
-  uint32_t last_relax_sequence_ = 0U;
-  bool relax_sequence_received_ = false;
-  uint32_t fresh_epoch_counter_ = 0U;
-  bool inputs_valid_last_cycle_ = false;
   LibXR::Thread thread_;
 
   /*----------工具函数--------------------------------*/
@@ -591,8 +588,8 @@ class Gimbal : public LibXR::Application {
   }
 
   void RequestMode(GimbalEvent gimbal_event) {
-    const uint32_t REQUEST_SEQUENCE = NextRequestSequence();
     const uint32_t FRESH_EPOCH = fresh_epoch_.load(std::memory_order_acquire);
+    const uint32_t REQUEST_SEQUENCE = NextRequestSequence();
     if (gimbal_event == GimbalEvent::SET_MODE_RELAX) {
       PublishRelaxSequence(REQUEST_SEQUENCE);
       return;
@@ -612,24 +609,22 @@ class Gimbal : public LibXR::Application {
 
     GimbalModeRequest latest_request = pending_mode_request_;
     bool mode_request_available =
-        pending_mode_request_valid_ && RequestIsAfterRelax(latest_request);
+        pending_mode_request_valid_ &&
+        mode_protocol_.OrdinaryIsCurrent(latest_request.sequence);
     pending_mode_request_valid_ = false;
 
     GimbalModeRequest request;
     while (mode_requests_.Pop(request) == LibXR::ErrorCode::OK) {
-      if (!RequestIsAfterRelax(request)) {
+      if (!mode_protocol_.ConsumeOrdinary(request.sequence)) {
         continue;
       }
-      if (!mode_request_available ||
-          GimbalInputGuard::IsSequenceAfter(request.sequence,
-                                            latest_request.sequence)) {
-        latest_request = request;
-        mode_request_available = true;
-      }
+      latest_request = request;
+      mode_request_available = true;
     }
 
     ConsumeRelaxSequence();
-    if (mode_request_available && !RequestIsAfterRelax(latest_request)) {
+    if (mode_request_available &&
+        !mode_protocol_.OrdinaryIsCurrent(latest_request.sequence)) {
       mode_request_available = false;
     }
 
@@ -640,7 +635,7 @@ class Gimbal : public LibXR::Application {
   void ApplyConsumedModeRequest(bool inputs_valid) {
     ConsumeRelaxSequence();
     if (pending_mode_request_valid_ &&
-        !RequestIsAfterRelax(pending_mode_request_)) {
+        !mode_protocol_.OrdinaryIsCurrent(pending_mode_request_.sequence)) {
       pending_mode_request_valid_ = false;
     }
     if (pending_relax_request_) {
@@ -653,9 +648,9 @@ class Gimbal : public LibXR::Application {
     }
 
     pending_mode_request_valid_ = false;
-    if (!GimbalInputGuard::RequestMatchesFreshEpoch(
-            pending_mode_request_.fresh_epoch,
-            fresh_epoch_.load(std::memory_order_acquire))) {
+    if (!mode_protocol_.CanApplyOrdinary(pending_mode_request_.sequence,
+                                         pending_mode_request_.fresh_epoch,
+                                         inputs_valid)) {
       return;
     }
     if (!GimbalInputGuard::AcceptActiveRequest(inputs_valid,
@@ -663,6 +658,7 @@ class Gimbal : public LibXR::Application {
       return;
     }
     ApplyMode(pending_mode_request_.mode);
+    mode_protocol_.RecordOrdinaryApplied(pending_mode_request_.sequence);
   }
 
   uint32_t NextRequestSequence() {
@@ -693,31 +689,15 @@ class Gimbal : public LibXR::Application {
   void ConsumeRelaxSequence() {
     const uint32_t SEQUENCE =
         relax_sequence_.exchange(0U, std::memory_order_acq_rel);
-    if (SEQUENCE == 0U ||
-        (relax_sequence_received_ &&
-         !GimbalInputGuard::IsSequenceAfter(SEQUENCE, last_relax_sequence_))) {
+    if (SEQUENCE == 0U || !mode_protocol_.ConsumeRelax(SEQUENCE)) {
       return;
     }
-    last_relax_sequence_ = SEQUENCE;
-    relax_sequence_received_ = true;
     pending_relax_request_ = true;
   }
 
-  bool RequestIsAfterRelax(const GimbalModeRequest& request) const {
-    return !relax_sequence_received_ ||
-           GimbalInputGuard::IsSequenceAfter(request.sequence,
-                                             last_relax_sequence_);
-  }
-
   void UpdateFreshEpoch(bool inputs_valid) {
-    if (inputs_valid && !inputs_valid_last_cycle_) {
-      ++fresh_epoch_counter_;
-      if (fresh_epoch_counter_ == 0U) {
-        fresh_epoch_counter_ = 1U;
-      }
-      fresh_epoch_.store(fresh_epoch_counter_, std::memory_order_release);
-    }
-    inputs_valid_last_cycle_ = inputs_valid;
+    fresh_epoch_.store(mode_protocol_.ObserveInputs(inputs_valid),
+                       std::memory_order_release);
   }
 
   void ControlYawMotor(const Motor::MotorCmd& command) {

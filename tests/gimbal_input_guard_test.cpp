@@ -5,10 +5,10 @@
 #include "../GimbalInputGuard.hpp"
 
 int main() {
-  assert(GimbalInputGuard::IsFresh(100U, 50100U, 50000U));
-  assert(!GimbalInputGuard::IsFresh(100U, 50101U, 50000U));
-  assert(GimbalInputGuard::IsFresh(0xfffffff0U, 0x10U, 50000U));
-  assert(GimbalInputGuard::IsFresh(0U, 0U, 50000U));
+  assert(GimbalInputGuard::IsFresh(100ULL, 50100ULL, 50000ULL));
+  assert(!GimbalInputGuard::IsFresh(100ULL, 50101ULL, 50000ULL));
+  assert(!GimbalInputGuard::IsFresh(100ULL, 0x100000064ULL, 50000ULL));
+  assert(GimbalInputGuard::IsFresh(0xfffffffffffffff0ULL, 0x10ULL, 50000ULL));
 
   assert(GimbalInputGuard::AllFinite({0.0f, 1.0f, -1.0f}));
   assert(!GimbalInputGuard::AllFinite(
@@ -61,4 +61,33 @@ int main() {
   assert(GimbalInputGuard::IsSequenceAfter(1U, 0xffffffffU));
   assert(!GimbalInputGuard::IsSequenceAfter(0xfffffffeU, 1U));
   assert(!GimbalInputGuard::IsSequenceAfter(0x80000001U, 1U));
+
+  GimbalInputGuard::ModeProtocol protocol;
+  assert(protocol.ObserveInputs(true) == 1U);
+  const uint32_t PRE_FAULT_EPOCH = protocol.FreshEpoch();
+  assert(protocol.ObserveInputs(false) == 0U);
+  const uint32_t DELAYED_PRE_FAULT_SEQUENCE = 20U;
+  assert(protocol.ObserveInputs(true) == 2U);
+  assert(protocol.ConsumeOrdinary(DELAYED_PRE_FAULT_SEQUENCE));
+  assert(!protocol.CanApplyOrdinary(DELAYED_PRE_FAULT_SEQUENCE, PRE_FAULT_EPOCH,
+                                    true));
+
+  const uint32_t POST_FRESH_SEQUENCE = 21U;
+  assert(protocol.ConsumeOrdinary(POST_FRESH_SEQUENCE));
+  assert(protocol.CanApplyOrdinary(POST_FRESH_SEQUENCE, protocol.FreshEpoch(),
+                                   true));
+  protocol.RecordOrdinaryApplied(POST_FRESH_SEQUENCE);
+
+  const uint32_t RELAX_SEQUENCE = 30U;
+  assert(protocol.ConsumeRelax(RELAX_SEQUENCE));
+  assert(!protocol.ConsumeOrdinary(29U));
+  assert(protocol.ConsumeOrdinary(31U));
+  assert(protocol.CanApplyOrdinary(31U, protocol.FreshEpoch(), true));
+
+  GimbalInputGuard::ModeProtocol delayed_protocol;
+  assert(delayed_protocol.ObserveInputs(true) == 1U);
+  assert(delayed_protocol.ConsumeOrdinary(11U));
+  assert(delayed_protocol.CanApplyOrdinary(11U, 1U, true));
+  delayed_protocol.RecordOrdinaryApplied(11U);
+  assert(!delayed_protocol.ConsumeOrdinary(10U));
 }

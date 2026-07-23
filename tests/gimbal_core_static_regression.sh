@@ -87,20 +87,22 @@ forbid 'CONTROL_DT_(MIN|MAX)|dt_valid_' 'control period validity guard'
 need '#include "GimbalInputGuard.hpp"' 'Gimbal input guard include'
 need 'static constexpr uint32_t IMU_TIMEOUT_US = 50000U' \
   'exact 50000 us IMU timeout'
-need 'uint32_t last_euler_rx_us_ = 0U' 'independent Euler receive timestamp'
-need 'uint32_t last_gyro_rx_us_ = 0U' 'independent gyro receive timestamp'
+need 'LibXR::MicrosecondTimestamp last_euler_rx_time_' \
+  'independent 64-bit Euler receive timestamp'
+need 'LibXR::MicrosecondTimestamp last_gyro_rx_time_' \
+  'independent 64-bit gyro receive timestamp'
 need 'bool euler_received_ = false' 'explicit Euler sample presence'
 need 'bool gyro_received_ = false' 'explicit gyro sample presence'
 need 'std::atomic_bool input_fault_latched_\{true\}' \
   'startup-latched atomic input fault state'
 need_multiline \
-  '(?s)euler_suber\.Available\(\).*EULER_SAMPLE_TIMESTAMP.*euler_suber\.GetTimestamp\(\).*euler_sample.*euler_suber\.GetData\(\).*AllFinite\(\s*\{\s*euler_sample\.Roll\(\),\s*euler_sample\.Pitch\(\),\s*euler_sample\.Yaw\(\)\}\).*euler_ = euler_sample;.*last_euler_rx_us_ = EULER_SAMPLE_TIMESTAMP;.*euler_received_ = true;.*else \{\s*gimbal->euler_received_ = false;' \
+  '(?s)euler_suber\.Available\(\).*EULER_SAMPLE_TIMESTAMP.*euler_suber\.GetTimestamp\(\).*euler_sample.*euler_suber\.GetData\(\).*AllFinite\(\s*\{\s*euler_sample\.Roll\(\),\s*euler_sample\.Pitch\(\),\s*euler_sample\.Yaw\(\)\}\).*euler_ = euler_sample;.*last_euler_rx_time_ = EULER_SAMPLE_TIMESTAMP;.*euler_received_ = true;.*else \{\s*gimbal->euler_received_ = false;' \
   'Euler sample is validated before independently refreshing freshness state'
 need_multiline \
-  '(?s)gyro_suber\.Available\(\).*GYRO_SAMPLE_TIMESTAMP.*gyro_suber\.GetTimestamp\(\).*gyro_sample.*gyro_suber\.GetData\(\).*AllFinite\(\s*\{gyro_sample\.x\(\), gyro_sample\.y\(\), gyro_sample\.z\(\)\}\).*gyro_data_ = gyro_sample;.*last_gyro_rx_us_ = GYRO_SAMPLE_TIMESTAMP;.*gyro_received_ = true;.*else \{\s*gimbal->gyro_received_ = false;' \
+  '(?s)gyro_suber\.Available\(\).*GYRO_SAMPLE_TIMESTAMP.*gyro_suber\.GetTimestamp\(\).*gyro_sample.*gyro_suber\.GetData\(\).*AllFinite\(\s*\{gyro_sample\.x\(\), gyro_sample\.y\(\), gyro_sample\.z\(\)\}\).*gyro_data_ = gyro_sample;.*last_gyro_rx_time_ = GYRO_SAMPLE_TIMESTAMP;.*gyro_received_ = true;.*else \{\s*gimbal->gyro_received_ = false;' \
   'gyro sample is validated before independently refreshing freshness state'
 need_multiline \
-  '(?s)const bool IMU_VALID =\s*gimbal->euler_received_ && gimbal->gyro_received_ &&\s*GimbalInputGuard::IsFresh\(gimbal->last_euler_rx_us_, NOW_US,\s*IMU_TIMEOUT_US\) &&\s*GimbalInputGuard::IsFresh\(gimbal->last_gyro_rx_us_, NOW_US,\s*IMU_TIMEOUT_US\) &&\s*GimbalInputGuard::AllFinite\(\s*\{gimbal->euler_\.Roll\(\), gimbal->euler_\.Pitch\(\),\s*gimbal->euler_\.Yaw\(\), gimbal->gyro_data_\.x\(\),\s*gimbal->gyro_data_\.y\(\), gimbal->gyro_data_\.z\(\)\}\);' \
+  '(?s)const LibXR::MicrosecondTimestamp NOW =\s*LibXR::Timebase::GetMicroseconds\(\);\s*const bool IMU_VALID =\s*gimbal->euler_received_ && gimbal->gyro_received_ &&\s*\(NOW - gimbal->last_euler_rx_time_\)\.ToMicrosecond\(\) <=\s*IMU_TIMEOUT_US &&\s*\(NOW - gimbal->last_gyro_rx_time_\)\.ToMicrosecond\(\) <=\s*IMU_TIMEOUT_US &&\s*GimbalInputGuard::AllFinite\(\s*\{gimbal->euler_\.Roll\(\), gimbal->euler_\.Pitch\(\),\s*gimbal->euler_\.Yaw\(\), gimbal->gyro_data_\.x\(\),\s*gimbal->gyro_data_\.y\(\), gimbal->gyro_data_\.z\(\)\}\);' \
   'Euler and gyro freshness and finite values form one validity gate'
 need_multiline \
   '(?s)const bool INPUTS_VALID =\s*gimbal->motor_feedback_online_ && IMU_VALID;\s*GimbalInputGuard::UpdateFaultLatch\(INPUTS_VALID,\s*gimbal->input_fault_latched_\);\s*gimbal->UpdateFreshEpoch\(INPUTS_VALID\);\s*gimbal->ApplyConsumedModeRequest\(INPUTS_VALID\);\s*if \(!GimbalInputGuard::ControlAllowed\(\s*INPUTS_VALID,\s*gimbal->input_fault_latched_\)\) \{\s*if \(!INPUTS_VALID\) \{\s*gimbal->RequestMode\(GimbalEvent::SET_MODE_RELAX\);\s*gimbal->ApplyMode\(GimbalEvent::SET_MODE_RELAX\);\s*\}\s*gimbal->Control\(\);\s*LibXR::Thread::Sleep\(2\);\s*continue;\s*\}\s*gimbal->ParseCMD\(\);\s*gimbal->Control\(\);' \

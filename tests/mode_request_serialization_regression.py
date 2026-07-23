@@ -69,10 +69,10 @@ for callback in callbacks:
 request_body = method_body(source, r"void\s+RequestMode\(GimbalEvent gimbal_event\)")
 require(
     request_body,
-    r"const uint32_t REQUEST_SEQUENCE = NextRequestSequence\(\);.*?"
-    r"const uint32_t FRESH_EPOCH =\s*fresh_epoch_\.load\("
-    r"std::memory_order_acquire\);",
-    "callback-time sequence and epoch capture",
+    r"^\s*const uint32_t FRESH_EPOCH =\s*fresh_epoch_\.load\("
+    r"std::memory_order_acquire\);\s*"
+    r"const uint32_t REQUEST_SEQUENCE = NextRequestSequence\(\);",
+    "first-operation callback epoch capture",
 )
 require(
     request_body,
@@ -135,31 +135,32 @@ require(
 )
 require(
     apply_request_body,
-    r"RequestMatchesFreshEpoch\(\s*pending_mode_request_\.fresh_epoch,\s*"
-    r"fresh_epoch_\.load\(std::memory_order_acquire\)\).*?"
+    r"mode_protocol_\.CanApplyOrdinary\(pending_mode_request_\.sequence,\s*"
+    r"pending_mode_request_\.fresh_epoch,\s*inputs_valid\).*?"
     r"AcceptActiveRequest\(inputs_valid,\s*"
     r"input_fault_latched_\).*?"
-    r"ApplyMode\(pending_mode_request_\.mode\)",
+    r"ApplyMode\(pending_mode_request_\.mode\);.*?"
+    r"mode_protocol_\.RecordOrdinaryApplied\("
+    r"pending_mode_request_\.sequence\)",
     "owner-only fresh active rearm",
-)
-request_cutoff_body = method_body(
-    source, r"bool\s+RequestIsAfterRelax\(const GimbalModeRequest& request\) const"
-)
-require(
-    request_cutoff_body,
-    r"IsSequenceAfter\(request\.sequence,\s*last_relax_sequence_\)",
-    "late queued request RELAX cutoff",
 )
 require(
     consume_body,
     r"while\s*\(mode_requests_\.Pop\(request\).*?"
-    r"if\s*\(!RequestIsAfterRelax\(request\)\)\s*\{\s*continue;",
-    "late queued request discard",
+    r"if\s*\(!mode_protocol_\.ConsumeOrdinary\(request\.sequence\)\)\s*"
+    r"\{\s*continue;",
+    "ordinary consumed-sequence cutoff",
 )
 require(
     source,
-    r"if\s*\(inputs_valid && !inputs_valid_last_cycle_\).*?"
-    r"fresh_epoch_\.store\(.*?std::memory_order_release\);",
+    r"if\s*\(SEQUENCE == 0U \|\|\s*"
+    r"!mode_protocol_\.ConsumeRelax\(SEQUENCE\)\)",
+    "RELAX sequence cutoff",
+)
+require(
+    source,
+    r"fresh_epoch_\.store\(mode_protocol_\.ObserveInputs\(inputs_valid\),\s*"
+    r"std::memory_order_release\);",
     "owner fresh epoch publication",
 )
 

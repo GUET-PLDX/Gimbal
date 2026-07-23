@@ -23,15 +23,29 @@ mutations = (
         "0U",
     ),
     (
+        "callback epoch capture ordering",
+        r"const uint32_t FRESH_EPOCH =\s*"
+        r"fresh_epoch_\.load\(std::memory_order_acquire\);\s*"
+        r"const uint32_t REQUEST_SEQUENCE = NextRequestSequence\(\);",
+        "const uint32_t REQUEST_SEQUENCE = NextRequestSequence();\n"
+        "    const uint32_t FRESH_EPOCH = "
+        "fresh_epoch_.load(std::memory_order_acquire);",
+    ),
+    (
         "RELAX sequence cutoff",
-        r"GimbalInputGuard::IsSequenceAfter\(request\.sequence,\s*"
-        r"last_relax_sequence_\)",
+        r"mode_protocol_\.ConsumeRelax\(SEQUENCE\)",
         "true",
     ),
     (
-        "late queued request discard",
-        r"if \(!RequestIsAfterRelax\(request\)\) \{\s*continue;\s*\}",
-        "if (false) { continue; }",
+        "ordinary consumed-sequence cutoff",
+        r"mode_protocol_\.ConsumeOrdinary\(request\.sequence\)",
+        "true",
+    ),
+    (
+        "ordinary applied-sequence record",
+        r"mode_protocol_\.RecordOrdinaryApplied\("
+        r"pending_mode_request_\.sequence\);",
+        "(void)pending_mode_request_.sequence;",
     ),
 )
 
