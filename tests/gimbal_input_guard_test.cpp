@@ -15,4 +15,26 @@ int main() {
       {0.0f, std::numeric_limits<float>::quiet_NaN()}));
   assert(!GimbalInputGuard::AllFinite(
       {std::numeric_limits<float>::infinity(), 0.0f}));
+
+  bool input_fault_latched = false;
+  bool active_mode = false;
+  GimbalInputGuard::UpdateFaultLatch(false, input_fault_latched);
+  assert(input_fault_latched);
+  if (GimbalInputGuard::AcceptActiveRequest(false, input_fault_latched)) {
+    active_mode = true;
+  }
+  assert(!active_mode);
+  assert(input_fault_latched);
+
+  GimbalInputGuard::UpdateFaultLatch(true, input_fault_latched);
+  assert(input_fault_latched);
+  assert(!GimbalInputGuard::ControlAllowed(true, input_fault_latched));
+  assert(!active_mode);
+
+  if (GimbalInputGuard::AcceptActiveRequest(true, input_fault_latched)) {
+    active_mode = true;
+  }
+  assert(active_mode);
+  assert(!input_fault_latched);
+  assert(GimbalInputGuard::ControlAllowed(true, input_fault_latched));
 }

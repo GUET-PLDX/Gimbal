@@ -89,6 +89,7 @@ depends:
 === END MANIFEST === */
 // clang-format on
 
+#include <atomic>
 #include <cmath>
 
 #include "CMD.hpp"
@@ -303,8 +304,15 @@ class Gimbal : public LibXR::Application {
                gimbal->euler_.Yaw(), gimbal->gyro_data_.x(),
                gimbal->gyro_data_.y(), gimbal->gyro_data_.z()});
       gimbal->imu_input_valid_ = IMU_VALID;
-      if (!gimbal->motor_feedback_online_ || !IMU_VALID) {
-        gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
+      const bool INPUTS_VALID = gimbal->motor_feedback_online_ && IMU_VALID;
+      gimbal->inputs_online_ = INPUTS_VALID;
+      GimbalInputGuard::UpdateFaultLatch(INPUTS_VALID,
+                                         gimbal->input_fault_latched_);
+      if (!GimbalInputGuard::ControlAllowed(INPUTS_VALID,
+                                            gimbal->input_fault_latched_)) {
+        if (!INPUTS_VALID) {
+          gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
+        }
         gimbal->Control();
         LibXR::Thread::Sleep(2);
         continue;
@@ -400,9 +408,13 @@ class Gimbal : public LibXR::Application {
    * @brief 云台控制计算与输出
    */
   void Control() {
-    if (!motor_feedback_online_ || !imu_input_valid_) {
+    const bool INPUTS_VALID = motor_feedback_online_ && imu_input_valid_;
+    GimbalInputGuard::UpdateFaultLatch(INPUTS_VALID, input_fault_latched_);
+    if (!GimbalInputGuard::ControlAllowed(INPUTS_VALID, input_fault_latched_)) {
       // 反馈无效时立即切松弛，避免继续使用旧反馈闭环输出。
-      SetMode(GimbalEvent::SET_MODE_RELAX);
+      if (!INPUTS_VALID) {
+        SetMode(GimbalEvent::SET_MODE_RELAX);
+      }
       SubmitRelaxOutput();
       return;
     }
@@ -456,6 +468,8 @@ class Gimbal : public LibXR::Application {
   Motor::Feedback motor_pit_feedback_;
   bool motor_feedback_online_ = true;
   bool imu_input_valid_ = false;
+  std::atomic_bool inputs_online_{false};
+  std::atomic_bool input_fault_latched_{true};
 
   CMD::GimbalCMD cmd_data_;
   Eigen::Matrix<float, 3, 1> gyro_data_;
@@ -649,6 +663,15 @@ class Gimbal : public LibXR::Application {
    * @param gimbal_event 云台事件类型
    */
   void SetMode(GimbalEvent gimbal_event) {
+    const bool ACTIVE_MODE_REQUEST =
+        gimbal_event == GimbalEvent::SET_MODE_COMMON ||
+        gimbal_event == GimbalEvent::SET_MODE_AUTOPATROL ||
+        gimbal_event == GimbalEvent::SET_MODE_LOW_SENSITIVITY;
+    if (ACTIVE_MODE_REQUEST &&
+        !GimbalInputGuard::AcceptActiveRequest(
+            static_cast<bool>(inputs_online_), input_fault_latched_)) {
+      return;
+    }
     if (gimbal_event == current_mode_) {
       return;
     }

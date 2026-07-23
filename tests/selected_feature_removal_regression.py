@@ -36,9 +36,7 @@ for description, token in forbidden.items():
 required = {
     "fixed Euler Topic": r'euler_suber\s*\(\s*"gimbal_euler"\s*\)',
     "fixed gyro Topic": r'gyro_suber\s*\(\s*"gimbal_gyro"\s*\)',
-    "motor and IMU feedback guard": (
-        r"if\s*\(\s*!motor_feedback_online_\s*\|\|\s*!imu_input_valid_\s*\)"
-    ),
+    "motor and IMU feedback guard": r"ControlAllowed\(INPUTS_VALID",
     "AI Yaw solver": r"void\s+Solve\s*\(\s*float&\s+pit_output\s*,\s*float&\s+yaw_output\s*\)",
     "AI output validity guard": r"if\s*\(\s*!YAW_LQR_ESO_OUTPUT\.valid",
     "local control mode": r"const\s+auto\s+CTRL_MODE\s*=\s*cmd_\.GetCtrlMode\(\)",

@@ -19,4 +19,26 @@ inline bool AllFinite(std::initializer_list<float> values) {
   return true;
 }
 
+template <typename FaultLatch>
+inline void UpdateFaultLatch(bool inputs_valid, FaultLatch& fault_latched) {
+  if (!inputs_valid) {
+    fault_latched = true;
+  }
+}
+
+template <typename FaultLatch>
+inline bool AcceptActiveRequest(bool inputs_valid, FaultLatch& fault_latched) {
+  if (!inputs_valid) {
+    fault_latched = true;
+    return false;
+  }
+  fault_latched = false;
+  return true;
+}
+
+template <typename FaultLatch>
+inline bool ControlAllowed(bool inputs_valid, const FaultLatch& fault_latched) {
+  return inputs_valid && !static_cast<bool>(fault_latched);
+}
+
 }  // namespace GimbalInputGuard
