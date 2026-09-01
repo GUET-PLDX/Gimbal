@@ -767,7 +767,7 @@ static void test_non_performance_gates(
     if (RESULT.controller != ControllerKind::LQR_1_1) {
       continue;
     }
-    CHECK_GATE(RESULT.max_abs_error < std::numbers::pi, RESULT,
+    CHECK_GATE(RESULT.max_abs_error < LibXR::PI, RESULT,
                "bounded_cyclic_error");
     CHECK_GATE(RESULT.max_abs_omega < 100.0, RESULT, "bounded_omega");
 

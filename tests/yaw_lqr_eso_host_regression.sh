@@ -8,7 +8,10 @@ CXX_BIN="${CXX:-c++}"
 mkdir -p "${BUILD_DIR}"
 export YAW_TEST_BUILD_DIR="${BUILD_DIR}"
 FLAGS=(-std=c++20 -Wall -Wextra -Werror -pedantic -ffp-contract=off
-       -I"${MODULE_DIR}" -I"${MODULE_DIR}/tests")
+       -DLIBXR_DEFAULT_SCALAR=float
+       -I"${MODULE_DIR}" -I"${MODULE_DIR}/tests"
+       -I"${WORKSPACE_ROOT}/Middlewares/Third_Party/LibXR/src/core"
+       -I"${WORKSPACE_ROOT}/Middlewares/Third_Party/LibXR/src/utils")
 if [[ "${SANITIZE:-0}" == "1" ]]; then
   FLAGS+=(-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
 else
