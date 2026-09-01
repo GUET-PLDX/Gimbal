@@ -40,6 +40,12 @@ required = {
     "local AI status": r"const\s+bool\s+AI_GIMBAL_ACTIVE\s*=\s*cmd_\.GetAIGimbalStatus\(\)",
     "direct AI config": r"yaw_lqr_eso_\.Calculate\(\s*yaw_lqr_eso_config_",
     "local AI output": r"const\s+auto\s+YAW_LQR_ESO_OUTPUT\s*=\s*yaw_lqr_eso_\.Calculate",
+    "AI controller dispatch": r"if\s*\(\s*yaw_ai_controller_\s*==\s*YawAiController::SMC\s*\)",
+    "manual controller dispatch": r"yaw_manual_controller_\s*==\s*YawManualController::SMC",
+    "direct SMC config": r"yaw_smc_\.Calculate\(\s*yaw_smc_config_",
+    "local SMC output": r"const\s+auto\s+YAW_SMC_OUTPUT\s*=\s*yaw_smc_\.Calculate",
+    "manual SMC solver": r"void\s+SolveManualYawSmc\s*\(\s*float&\s+yaw_output\s*\)",
+    "shared SMC solver": r"void\s+SolveSmcYaw\s*\(\s*float\s+theta_ref",
 }
 
 for description, pattern in required.items():

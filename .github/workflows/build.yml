@@ -7,7 +7,7 @@ on:
     - cron: '0 3 1 * *'  # 每月1日凌晨3点（UTC）自动触发
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:

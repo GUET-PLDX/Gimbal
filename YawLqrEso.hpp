@@ -3,6 +3,9 @@
 #include <cmath>
 #include <cstdint>
 
+#include "cycle_value.hpp"
+#include "libxr_def.hpp"
+
 /**
  * @brief Yaw-axis LQR/LQI controller with an extended state observer.
  *
@@ -176,14 +179,14 @@ class YawLqrEso final {
     }
 
     const float WRAPPED_THETA_DELTA_RAD =
-        WrapPi(feedback.theta_rad - unwrap_raw_theta_rad_);
+        LibXR::CycleValue<float>(feedback.theta_rad) - unwrap_raw_theta_rad_;
     const float NEXT_THETA_UNWRAPPED_RAD =
         theta_unwrapped_rad_ + WRAPPED_THETA_DELTA_RAD;
 
     output.theta_unwrapped_rad = NEXT_THETA_UNWRAPPED_RAD;
-    output.e_theta_rad =
-        Deadband(WrapPi(feedback.theta_rad - reference.theta_rad),
-                 config.theta_deadband_rad);
+    output.e_theta_rad = Deadband(
+        LibXR::CycleValue<float>(feedback.theta_rad) - reference.theta_rad,
+        config.theta_deadband_rad);
     output.e_omega_rad_s = feedback.omega_rad_s - reference.omega_rad_s;
     output.tau_ff_alpha_nm = j_kg_m2 * reference.alpha_rad_s2;
     output.tau_ff_viscous_nm = config.b_nms_rad * reference.omega_rad_s;
@@ -408,8 +411,6 @@ class YawLqrEso final {
   static constexpr float MIN_DT_S = 0.0005f;
   static constexpr float MAX_DT_S = 0.02f;
   static constexpr float EPSILON = 1e-6f;
-  static constexpr float PI = 3.14159265358979323846f;
-  static constexpr float TWO_PI = 2.0f * PI;
 
   /** @brief Clamp a scalar to an inclusive range. */
   static float Clamp(float value, float minimum, float maximum) {
@@ -420,15 +421,6 @@ class YawLqrEso final {
       return maximum;
     }
     return value;
-  }
-
-  /** @brief Wrap an angle to [-pi, pi). */
-  static float WrapPi(float angle_rad) {
-    float wrapped_rad = std::fmod(angle_rad + PI, TWO_PI);
-    if (wrapped_rad < 0.0f) {
-      wrapped_rad += TWO_PI;
-    }
-    return wrapped_rad - PI;
   }
 
   /** @brief Remove a symmetric deadband from a scalar error. */

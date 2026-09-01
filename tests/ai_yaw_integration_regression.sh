@@ -4,6 +4,7 @@ set -euo pipefail
 HEADER="${1:-Gimbal.hpp}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ALGORITHM_HEADER="${SCRIPT_DIR}/../YawLqrEso.hpp"
+SMC_HEADER="${SCRIPT_DIR}/../YawSmc.hpp"
 
 bash "${SCRIPT_DIR}/gimbal_core_static_regression.sh" "${HEADER}"
 
@@ -129,6 +130,8 @@ forbid_file() {
 
 forbid_file "${ALGORITHM_HEADER}" 'YawRouteState' \
   'route policy in the mathematical controller header'
+forbid_file "${SMC_HEADER}" 'YawRouteState' \
+  'route policy in the sliding-mode controller header'
 forbid_file "${HEADER}" 'YawRouteState|yaw_route_|cmd_sample_seq_' \
   'route state machine or command barrier in Gimbal'
 forbid_file "${HEADER}" 'ai_yaw_lqr_eso_enable' \
@@ -137,8 +140,11 @@ forbid_file "${HEADER}" 'IsGm6020LimitValid|IsRotorCompatibleAiConfig' \
   'motor-specific route selection gates'
 forbid_file "${ALGORITHM_HEADER}" 'float j_kg_m2\{\}' \
   'duplicate Yaw inertia in controller Config'
-forbid_file "${HEADER}" '^[[:space:]]+j_kg_m2:' \
-  'duplicate Yaw inertia in the Gimbal manifest'
+forbid_in_lines \
+  '  - yaw_lqr_eso:' \
+  '  - yaw_smc:' \
+  'j_kg_m2:' \
+  'duplicate Yaw inertia in the LQR Gimbal manifest'
 forbid_file "${ALGORITHM_HEADER}" 'torque_(min|max)_nm' \
   'duplicate AI Yaw hard torque limits in controller Config'
 need_multiline \
@@ -147,6 +153,11 @@ need_multiline \
 
 need 'bool ai_yaw_active_ = false' 'direct AI active state'
 need 'bool yaw_lqr_eso_reset_pending_ = true' 'controller reset lifecycle state'
+need 'bool yaw_smc_reset_pending_ = true' 'sliding-mode reset lifecycle state'
+need 'YawManualController yaw_manual_controller_ = YawManualController::PID' \
+  'manual controller selection member'
+need 'YawAiController yaw_ai_controller_ = YawAiController::LQR_ESO' \
+  'AI controller selection member'
 need_count 'const auto CTRL_MODE = cmd_\.GetCtrlMode\(\);' 1 \
   'one local control-mode sample'
 need_count 'const bool AI_GIMBAL_ACTIVE = cmd_\.GetAIGimbalStatus\(\);' 1 \
@@ -156,11 +167,36 @@ need_multiline \
   'local CMD-based AI selection'
 need 'ai_yaw_active_ = AI_YAW_ACTIVE' 'direct AI active-state assignment'
 need_multiline \
+  'if \(yaw_ai_controller_ == YawAiController::SMC\) \{\s*SolveAiYawSmc\(yaw_output\);\s*\} else \{\s*SolveAiYawLqrEso\(yaw_output\);\s*\}' \
+  'AI Yaw controller dispatch'
+need_multiline \
+  'const bool NEXT_USES_SMC =\s*ai_yaw_active_ \? yaw_ai_controller_ == YawAiController::SMC\s*: yaw_manual_controller_ == YawManualController::SMC;' \
+  'independent SMC enable for AI and manual paths'
+need_multiline \
+  'if \(NEXT_USES_SMC && \(ai_yaw_active_ != previous_smc_ai_yaw_active_ \|\|\s*!previous_yaw_used_smc_\)\) \{\s*yaw_smc_reset_pending_ = true;\s*\}' \
+  'reset sliding mode when entering SMC or switching SMC references'
+need 'previous_smc_ai_yaw_active_ = ai_yaw_active_' \
+  'remember previous AI Yaw activity for sliding-mode reset'
+need 'previous_yaw_used_smc_ = NEXT_USES_SMC' \
+  'remember whether the previous Yaw solve used sliding mode'
+need_multiline \
+  'void SolveAiYawSmc\(float& yaw_output\) \{\s*SolveSmcYaw\(cmd_data_\.yaw, cmd_data_\.yaw_dot, cmd_data_\.yaw_ddot,\s*yaw_output\);\s*\}' \
+  'AI sliding-mode uses command references'
+need_multiline \
+  'void SolveManualYawSmc\(float& yaw_output\) \{\s*SolveSmcYaw\(static_cast<float>\(target_yaw_cmd_\), target_yaw_dot_,\s*target_yaw_ddot_, yaw_output\);\s*\}' \
+  'manual sliding-mode uses operator integrated references'
+need_multiline \
   'if \(yaw_lqr_eso_reset_pending_\) \{.*yaw_lqr_eso_\.Reset\(' \
   'reset before AI calculation'
 need_multiline \
   'const auto YAW_LQR_ESO_OUTPUT = yaw_lqr_eso_\.Calculate\(.*cmd_data_\.yaw.*cmd_data_\.yaw_dot.*cmd_data_\.yaw_ddot' \
   'direct AI reference construction'
+need_multiline \
+  'if \(yaw_smc_reset_pending_\) \{.*yaw_smc_\.Reset\(' \
+  'reset before sliding-mode calculation'
+need_multiline \
+  'const auto YAW_SMC_OUTPUT =\s*yaw_smc_\.Calculate\(yaw_smc_config_,\s*\{\.theta_rad = theta_ref,\s*\.omega_rad_s = omega_ref,\s*\.alpha_rad_s2 = alpha_ref\}' \
+  'shared sliding-mode reference construction'
 need_multiline \
   'if \(!YAW_LQR_ESO_OUTPUT\.valid.*\) \{\s*yaw_output = 0\.0f;\s*yaw_lqr_eso_reset_pending_ = true;\s*return;\s*\}' \
   'invalid AI output becomes zero and requests reset'
@@ -168,17 +204,23 @@ need_multiline \
   'yaw_lqr_eso_reset_pending_ = false;\s*yaw_output = YAW_LQR_ESO_OUTPUT\.tau_cmd_nm;' \
   'valid calculation clears reset before motor submission'
 need_multiline \
-  'void Solve\(float& pit_output, float& yaw_output\) \{.*if \(ai_yaw_active_\) \{' \
-  'single Solve function owns direct AI selection'
-forbid_file "${HEADER}" 'SolveAiYaw|SolveLegacyYaw' \
-  'split Yaw solve helpers'
+  'if \(!YAW_SMC_OUTPUT\.valid.*\) \{\s*yaw_output = 0\.0f;\s*yaw_smc_reset_pending_ = true;\s*return;\s*\}' \
+  'invalid sliding-mode output becomes zero and requests reset'
+need_multiline \
+  'yaw_smc_reset_pending_ = false;\s*yaw_output = YAW_SMC_OUTPUT\.tau_cmd_nm;' \
+  'valid sliding-mode calculation clears reset before motor submission'
+need_multiline \
+  'if \(ai_yaw_active_\) \{\s*SolveAiYaw\(yaw_output\);\s*\} else if \(yaw_manual_controller_ == YawManualController::SMC\) \{\s*SolveManualYawSmc\(yaw_output\);\s*\} else \{\s*SolveLegacyYaw\(yaw_output\);\s*\}' \
+  'independent manual and AI Yaw solve selection'
+forbid_file "${HEADER}" 'YawManualController::LQR_ESO' \
+  'LQR/ESO is not a manual Yaw controller option'
 need 'void ControlYawMotor\(const Motor::MotorCmd& command\)' \
   'submission method without route confirmation parameter'
 need_multiline \
   'void ClearSubmittedYawTorqueLedger\(\) \{\s*last_submitted_yaw_torque_nm_ = 0\.0f;\s*last_submitted_yaw_torque_valid_ = false;\s*\}' \
   'submitted-torque ledger invalidation without controller rearm'
 need_multiline \
-  'void ControlYawMotor\(const Motor::MotorCmd& command\) \{\s*if \(motor_yaw_feedback_\.state == 0\) \{\s*motor_yaw_->Enable\(\);\s*ClearSubmittedYawTorqueLedger\(\);\s*\} else if \(motor_yaw_feedback_\.state != 1\) \{\s*motor_yaw_->ClearError\(\);\s*ClearSubmittedYawTorqueLedger\(\);\s*\} else \{\s*motor_yaw_->Control\(command\);\s*last_submitted_yaw_torque_nm_ = command\.torque;\s*last_submitted_yaw_torque_valid_ = true;\s*yaw_lqr_eso_\.CommitAppliedTorque\(command\.torque\);\s*\}\s*\}' \
+  'void ControlYawMotor\(const Motor::MotorCmd& command\) \{\s*if \(motor_yaw_feedback_\.state == 0\) \{\s*motor_yaw_->Enable\(\);\s*ClearSubmittedYawTorqueLedger\(\);\s*\} else if \(motor_yaw_feedback_\.state != 1\) \{\s*motor_yaw_->ClearError\(\);\s*ClearSubmittedYawTorqueLedger\(\);\s*\} else \{\s*motor_yaw_->Control\(command\);\s*last_submitted_yaw_torque_nm_ = command\.torque;\s*last_submitted_yaw_torque_valid_ = true;\s*yaw_lqr_eso_\.CommitAppliedTorque\(command\.torque\);\s*yaw_smc_\.CommitAppliedTorque\(command\.torque\);\s*\}\s*\}' \
   'Enable and ClearError discard only the candidate ledger while recovered Control commits the applied torque'
 
 forbid_in_lines \

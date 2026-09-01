@@ -5,10 +5,11 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
-#include <numbers>
 #include <span>
 #include <utility>
 #include <vector>
+
+#include "libxr_def.hpp"
 
 struct ReferenceSample {
   double theta{};
@@ -22,16 +23,16 @@ struct PlantState {
 };
 
 constexpr double deg_to_rad(double degrees) {
-  return degrees * std::numbers::pi / 180.0;
+  return degrees * LibXR::PI / 180.0;
 }
 
 constexpr double rad_to_deg(double radians) {
-  return radians * 180.0 / std::numbers::pi;
+  return radians * 180.0 / LibXR::PI;
 }
 
 inline double inertia_torque_peak(double plant_j, double frequency,
                                   double amplitude) {
-  const double OMEGA = 2.0 * std::numbers::pi * frequency;
+  const double OMEGA = LibXR::TWO_PI * frequency;
   return plant_j * amplitude * OMEGA * OMEGA;
 }
 
@@ -42,13 +43,13 @@ inline double inertia_torque_rms(double plant_j, double frequency,
 
 inline double torque_limited_amplitude_deg(double plant_j, double frequency,
                                            double torque_limit) {
-  const double OMEGA = 2.0 * std::numbers::pi * frequency;
+  const double OMEGA = LibXR::TWO_PI * frequency;
   return rad_to_deg(torque_limit / (plant_j * OMEGA * OMEGA));
 }
 
 inline ReferenceSample sine_reference(double amplitude, double frequency,
                                       double time) {
-  const double OMEGA = 2.0 * std::numbers::pi * frequency;
+  const double OMEGA = LibXR::TWO_PI * frequency;
   const double PHASE = OMEGA * time;
   return {.theta = amplitude * std::sin(PHASE),
           .omega = amplitude * OMEGA * std::cos(PHASE),
@@ -160,12 +161,12 @@ inline PlantState propagate_exact_zoh(PlantState state, double plant_j,
 }
 
 inline double wrap_pi(double angle) {
-  constexpr double TWO_PI = 2.0 * std::numbers::pi;
-  double wrapped = std::fmod(angle + std::numbers::pi, TWO_PI);
+  constexpr double TWO_PI = LibXR::TWO_PI;
+  double wrapped = std::fmod(angle + LibXR::PI, TWO_PI);
   if (wrapped < 0.0) {
     wrapped += TWO_PI;
   }
-  return wrapped - std::numbers::pi;
+  return wrapped - LibXR::PI;
 }
 
 class LegacyYawAdapter final {
@@ -366,7 +367,7 @@ inline PhaseFit fit_phase(std::span<const PhaseSample> samples,
   std::array<double, 3> right_hand_side{};
   double total_time = 0.0;
   double soft_hard_union_time = 0.0;
-  const double OMEGA = 2.0 * std::numbers::pi * frequency;
+  const double OMEGA = LibXR::TWO_PI * frequency;
   for (const PhaseSample& SAMPLE : samples) {
     if (!std::isfinite(SAMPLE.time) || !std::isfinite(SAMPLE.value) ||
         !std::isfinite(SAMPLE.dt) || SAMPLE.dt <= 0.0) {

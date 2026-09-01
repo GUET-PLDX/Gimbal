@@ -232,8 +232,8 @@ need_multiline \
   'thread_priority: LibXR::Thread::Priority::MEDIUM\r?\n  - rotor_ff_enabled: false' \
   'rotor feedforward manifest option appended after thread priority'
 need_multiline \
-  'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false,\s*YawLqrEso::Config yaw_lqr_eso = \{\}\)' \
-  'AI Yaw config appended after thread priority'
+  'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false,\s*YawManualController yaw_manual_controller = YawManualController::PID,\s*YawAiController yaw_ai_controller = YawAiController::LQR_ESO,\s*YawLqrEso::Config yaw_lqr_eso = \{\},\s*YawSmc::Config yaw_smc = \{\}\)' \
+  'manual and AI Yaw controllers appended after thread priority'
 need_multiline \
   'ASyncSubscriber<LibXR::EulerAngle<float>> euler_suber\s*\(\s*"gimbal_euler"\s*\)' \
   'Euler subscriber uses fixed Gimbal Topic name'

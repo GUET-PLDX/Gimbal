@@ -53,8 +53,9 @@ require(source, r"void\s+ApplyMode\(GimbalEvent gimbal_event\)", "private mode m
 callbacks = re.findall(
     r"LibXR::Callback<uint32_t>::Create\(\s*\[\].*?\n\s*this\);", source, re.S
 )
-if len(callbacks) != 3:
-    raise SystemExit(f"missing: expected 3 event callbacks, found {len(callbacks)}")
+if len(callbacks) != 4:
+    raise SystemExit(f"missing: expected 4 event callbacks, found {len(callbacks)}")
+request_mode_callbacks = 0
 for callback in callbacks:
     for forbidden in (
         r"gimbal->ApplyMode\(",
@@ -64,7 +65,12 @@ for callback in callbacks:
     ):
         if re.search(forbidden, callback):
             raise SystemExit(f"forbidden callback mutation: {forbidden}")
-    require(callback, r"gimbal->RequestMode\(", "callback RequestMode call")
+    if re.search(r"gimbal->RequestMode\(", callback):
+        request_mode_callbacks += 1
+if request_mode_callbacks != 3:
+    raise SystemExit(
+        f"missing: expected 3 RequestMode callbacks, found {request_mode_callbacks}"
+    )
 
 request_body = method_body(source, r"void\s+RequestMode\(GimbalEvent gimbal_event\)")
 require(

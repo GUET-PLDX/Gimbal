@@ -83,7 +83,7 @@ static void test_base_state_feedback_and_angle_unwrap() {
   controller.Reset(3.13f, 0.0f, 0.0f);
   output = calculate_once(controller, cfg, -3.13f, 0.0f, 0.0f, -3.13f, 0.0f);
   CHECK(std::fabs(output.e_theta_rad) < 0.03f);
-  CHECK(output.theta_unwrapped_rad > 3.14f);
+  CHECK(output.theta_unwrapped_rad > static_cast<float>(LibXR::PI));
 }
 
 static void test_signed_angle_deadband() {

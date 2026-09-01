@@ -1,7 +1,6 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <numbers>
 #include <vector>
 
 #include "yaw_lqr_eso_simulation.hpp"
@@ -40,7 +39,7 @@ static void test_physical_torque_bounds() {
 static void test_sine_reference_derivatives() {
   constexpr double AMPLITUDE = 0.4;
   constexpr double FREQUENCY = 2.5;
-  constexpr double OMEGA = 2.0 * std::numbers::pi * FREQUENCY;
+  constexpr double OMEGA = LibXR::TWO_PI * FREQUENCY;
 
   const ReferenceSample START = sine_reference(AMPLITUDE, FREQUENCY, 0.0);
   CHECK_NEAR_DOUBLE(START.theta, 0.0, 1.0e-14);
@@ -174,8 +173,7 @@ static double phase_signal(double time) {
   constexpr double GAIN = 0.8;
   constexpr double OFFSET = 0.25;
   const double PHASE_LAG = deg_to_rad(15.0);
-  return OFFSET +
-         GAIN * std::sin(2.0 * std::numbers::pi * FREQUENCY * time - PHASE_LAG);
+  return OFFSET + GAIN * std::sin(LibXR::TWO_PI * FREQUENCY * time - PHASE_LAG);
 }
 
 static void test_phase_fit() {
