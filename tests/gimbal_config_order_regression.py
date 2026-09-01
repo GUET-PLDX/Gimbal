@@ -35,6 +35,42 @@ EXPECTED_FIELDS = (
     "torque_slew_enable",
 )
 
+SMC_EXPECTED_FIELDS = (
+    "j_kg_m2",
+    "c",
+    "k",
+    "epsilon",
+    "q",
+    "p",
+    "error_deadband_rad",
+    "ftsmc_switch_rad",
+    "sat_boundary",
+    "torque_soft_limit_nm",
+    "torque_min_nm",
+    "torque_max_nm",
+    "torque_slew_rate_nm_s",
+    "ftsmc_enable",
+    "torque_slew_enable",
+)
+
+SMC_EXPECTED_DEFAULTS = {
+    "j_kg_m2": 0.03,
+    "c": 20.0,
+    "k": 120.0,
+    "epsilon": 0.5,
+    "q": 21.0,
+    "p": 27.0,
+    "error_deadband_rad": 0.0,
+    "ftsmc_switch_rad": 0.0174533,
+    "sat_boundary": 1.0,
+    "torque_soft_limit_nm": 2.0,
+    "torque_min_nm": -2.223,
+    "torque_max_nm": 2.223,
+    "torque_slew_rate_nm_s": 1000.0,
+    "ftsmc_enable": True,
+    "torque_slew_enable": True,
+}
+
 EXPECTED_DEFAULTS = {
     "j_kg_m2": 0.03,
     "b_nms_rad": 0.0,
@@ -69,24 +105,41 @@ EXPECTED_DEFAULTS = {
 parser = argparse.ArgumentParser()
 parser.add_argument("--header", required=True)
 parser.add_argument("--algorithm", required=True)
+parser.add_argument("--smc-algorithm", required=True)
 parser.add_argument("--config")
 parser.add_argument("--generated")
 parser.add_argument("--header-only", action="store_true")
 args = parser.parse_args()
 
-algorithm = pathlib.Path(args.algorithm).read_text()
-algorithm = re.sub(r"//.*?$|/\*.*?\*/", "", algorithm, flags=re.M | re.S)
-block = re.search(r"struct Config\s*\{(.*?)\n\s*\};", algorithm, re.S)
-if block is None:
-    raise SystemExit("Config struct not found")
-fields = []
-for declaration in re.finditer(r"\b(?:float|bool)\s+([^;]+);", block.group(1)):
-    for item in declaration.group(1).split(","):
-        name = re.search(r"([a-z][a-z0-9_]*)", item.strip())
-        if name:
-            fields.append(name.group(1))
-if tuple(fields) != EXPECTED_FIELDS:
-    raise SystemExit("Config order mismatch")
+
+def config_fields(source, struct_name):
+    algorithm = re.sub(r"//.*?$|/\*.*?\*/", "", source, flags=re.M | re.S)
+    block = re.search(
+        r"struct " + struct_name + r"\s*\{(.*?)\n\s*\};", algorithm, re.S
+    )
+    if block is None:
+        raise SystemExit(f"{struct_name} struct not found")
+    fields = []
+    for declaration in re.finditer(r"\b(?:float|bool)\s+([^;]+);", block.group(1)):
+        for item in declaration.group(1).split(","):
+            name = re.search(r"([a-z][a-z0-9_]*)", item.strip())
+            if name:
+                fields.append(name.group(1))
+    return tuple(fields)
+
+
+def mapping_from_manifest(manifest_args, key):
+    item = next(entry[key] for entry in manifest_args if key in entry)
+    if not isinstance(item, dict):
+        raise SystemExit(f"{key} manifest config must be a mapping")
+    return item
+
+lqr_fields = config_fields(pathlib.Path(args.algorithm).read_text(), "Config")
+if lqr_fields != EXPECTED_FIELDS:
+    raise SystemExit("LQR Config order mismatch")
+smc_fields = config_fields(pathlib.Path(args.smc_algorithm).read_text(), "Config")
+if smc_fields != SMC_EXPECTED_FIELDS:
+    raise SystemExit("SMC Config order mismatch")
 
 header = pathlib.Path(args.header).read_text()
 manifest_match = re.search(
@@ -103,25 +156,45 @@ if any(not isinstance(item, dict) or len(item) != 1 for item in manifest_args):
 manifest_names = [next(iter(item)) for item in manifest_args]
 expected_tail = [
     "rotor_ff_enabled",
+    "yaw_manual_controller",
+    "yaw_ai_controller",
     "yaw_lqr_eso",
+    "yaw_smc",
 ]
-if manifest_names[-2:] != expected_tail:
+if manifest_names[-5:] != expected_tail:
     raise SystemExit("manifest constructor order mismatch")
 if "ai_yaw_lqr_eso_enable" in manifest_names:
     raise SystemExit("removed route master remains in manifest")
 if {"euler_topic_name", "gyro_topic_name"} & set(manifest_names):
     raise SystemExit("removed Gimbal IMU Topic parameters remain in manifest")
-yaw_manifest = next(
-    item["yaw_lqr_eso"] for item in manifest_args if "yaw_lqr_eso" in item
+yaw_manual_controller = next(
+    item["yaw_manual_controller"]
+    for item in manifest_args
+    if "yaw_manual_controller" in item
 )
-if not isinstance(yaw_manifest, dict):
-    raise SystemExit("yaw_lqr_eso manifest config must be a mapping")
+if yaw_manual_controller != "YawManualController::PID":
+    raise SystemExit("manifest default manual controller mismatch")
+yaw_ai_controller = next(
+    item["yaw_ai_controller"]
+    for item in manifest_args
+    if "yaw_ai_controller" in item
+)
+if yaw_ai_controller != "YawAiController::LQR_ESO":
+    raise SystemExit("manifest default AI controller mismatch")
+yaw_manifest = mapping_from_manifest(manifest_args, "yaw_lqr_eso")
 if tuple(yaw_manifest.keys()) != EXPECTED_FIELDS:
     raise SystemExit("manifest order mismatch")
 for key, expected_value in EXPECTED_DEFAULTS.items():
     actual_value = yaw_manifest[key]
     if type(actual_value) is not type(expected_value) or actual_value != expected_value:
         raise SystemExit(f"manifest default mismatch: {key}")
+smc_manifest = mapping_from_manifest(manifest_args, "yaw_smc")
+if tuple(smc_manifest.keys()) != SMC_EXPECTED_FIELDS:
+    raise SystemExit("SMC manifest order mismatch")
+for key, expected_value in SMC_EXPECTED_DEFAULTS.items():
+    actual_value = smc_manifest[key]
+    if type(actual_value) is not type(expected_value) or actual_value != expected_value:
+        raise SystemExit(f"SMC manifest default mismatch: {key}")
 
 if not args.header_only:
     if args.config is None:
@@ -131,9 +204,16 @@ if not args.header_only:
     gimbal_args = gimbal["constructor_args"]
     if "ai_yaw_lqr_eso_enable" in gimbal_args:
         raise SystemExit("removed route master remains in target YAML")
+    if gimbal_args.get("yaw_manual_controller") != "YawManualController::SMC":
+        raise SystemExit("sentry gimbal YAML must select SMC for manual Yaw")
+    if gimbal_args.get("yaw_ai_controller") != "YawAiController::SMC":
+        raise SystemExit("sentry gimbal YAML must select SMC for AI Yaw")
     yaw_yaml = gimbal_args["yaw_lqr_eso"]
     if tuple(yaw_yaml.keys()) != EXPECTED_FIELDS:
         raise SystemExit("YAML order mismatch")
+    smc_yaml = gimbal_args["yaw_smc"]
+    if tuple(smc_yaml.keys()) != SMC_EXPECTED_FIELDS:
+        raise SystemExit("SMC YAML order mismatch")
     if args.generated:
 
         def cpp(value):
@@ -142,8 +222,17 @@ if not args.header_only:
             return str(value)
 
         expected = "{" + ",".join(cpp(yaw_yaml[key]) for key in EXPECTED_FIELDS) + "}"
+        smc_expected = (
+            "{" + ",".join(cpp(smc_yaml[key]) for key in SMC_EXPECTED_FIELDS) + "}"
+        )
         generated = re.sub(r"\s+", "", pathlib.Path(args.generated).read_text())
         if expected not in generated:
             raise SystemExit("generated aggregate and Topic suffix mismatch")
+        if "YawManualController::SMC" not in generated:
+            raise SystemExit("generated manual controller enum mismatch")
+        if "YawAiController::SMC" not in generated:
+            raise SystemExit("generated AI controller enum mismatch")
+        if smc_expected not in generated:
+            raise SystemExit("generated SMC aggregate mismatch")
 
 print("PASS: Gimbal config order regression")

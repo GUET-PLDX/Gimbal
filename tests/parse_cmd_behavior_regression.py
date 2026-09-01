@@ -180,7 +180,7 @@ PITCH_RATE = (
     r"target_pit_dot_ = PIT_OPERATOR_RATE; target_pit_ddot_ = 0\.0f;"
 )
 PATROL_PITCH = (
-    r"target_pit_cmd_ -= patrol_range_ \* \(2 / M_PI\) \* "
+    r"target_pit_cmd_ -= patrol_range_ \* \(2 / LibXR::PI\) \* "
     r"asin\(sin\(patrol_omega_ \* \(LibXR::Timebase::GetMilliseconds\(\) - "
     r"patrol_start_time\)\)\) / 1000\.0f; target_pit_dot_ = 0\.0f; "
     r"target_pit_ddot_ = 0\.0f;"

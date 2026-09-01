@@ -55,6 +55,8 @@ constructor_args:
   - referee: '@&ref'
   - thread_priority: LibXR::Thread::Priority::MEDIUM
   - rotor_ff_enabled: false
+  - yaw_manual_controller: YawManualController::PID
+  - yaw_ai_controller: YawAiController::LQR_ESO
   - yaw_lqr_eso:
       j_kg_m2: 0.03
       b_nms_rad: 0.0
@@ -83,6 +85,22 @@ constructor_args:
       lqi_enable: false
       torque_bias_enable: false
       torque_slew_enable: true
+  - yaw_smc:
+      j_kg_m2: 0.03
+      c: 20.0
+      k: 120.0
+      epsilon: 0.5
+      q: 21.0
+      p: 27.0
+      error_deadband_rad: 0.0
+      ftsmc_switch_rad: 0.0174533
+      sat_boundary: 1.0
+      torque_soft_limit_nm: 2.0
+      torque_min_nm: -2.223
+      torque_max_nm: 2.223
+      torque_slew_rate_nm_s: 1000.0
+      ftsmc_enable: true
+      torque_slew_enable: true
 template_args: []
 required_hardware: []
 depends:
@@ -101,6 +119,7 @@ depends:
 #include "Motor.hpp"
 #include "Referee.hpp"
 #include "YawLqrEso.hpp"
+#include "YawSmc.hpp"
 #include "app_framework.hpp"
 #include "cycle_value.hpp"
 #include "event.hpp"
@@ -120,8 +139,19 @@ enum class GimbalEvent : uint8_t {
   SET_MODE_RELAX,
   SET_MODE_COMMON,
   SET_MODE_AUTOPATROL,
-  SET_MODE_LOW_SENSITIVITY
+  SET_MODE_LOW_SENSITIVITY,
+  SET_VISION_IDLE,
+  SET_VISION_AUTO_AIM,
+  SET_VISION_SMALL_BUFF,
+  SET_VISION_BIG_BUFF
 };
+static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_RELAX) == 0U);
+static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_COMMON) == 1U);
+static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_AUTOPATROL) == 2U);
+static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_LOW_SENSITIVITY) ==
+              3U);
+enum class YawManualController : uint8_t { PID, SMC };
+enum class YawAiController : uint8_t { LQR_ESO, SMC };
 class Gimbal : public LibXR::Application {
  public:
   /**
@@ -150,7 +180,10 @@ class Gimbal : public LibXR::Application {
    * @param rotor_ff_enabled
    *
    * 是否启用小陀螺模式Yaw轴角速度前馈
+   * @param yaw_manual_controller 手动 Yaw 控制器选择，仅 PID 或 SMC
+   * @param yaw_ai_controller AI Yaw 控制器选择，LQR/ESO 或 SMC
    * @param yaw_lqr_eso AI Yaw LQR/ESO参数
+   * @param yaw_smc Yaw 滑模参数
    */
   Gimbal(
       LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app, CMD& cmd,
@@ -163,7 +196,10 @@ class Gimbal : public LibXR::Application {
       float yaw_zero, float patrol_range, float patrol_omega, bool reverse_flag,
       Referee* referee,
       LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,
-      bool rotor_ff_enabled = false, YawLqrEso::Config yaw_lqr_eso = {})
+      bool rotor_ff_enabled = false,
+      YawManualController yaw_manual_controller = YawManualController::PID,
+      YawAiController yaw_ai_controller = YawAiController::LQR_ESO,
+      YawLqrEso::Config yaw_lqr_eso = {}, YawSmc::Config yaw_smc = {})
       : cmd_(cmd),
         pid_yaw_angle_(pid_yaw_angle),
         pid_yaw_omega_(pid_yaw_omega),
@@ -185,7 +221,10 @@ class Gimbal : public LibXR::Application {
         reverse_flag_(reverse_flag ? 1.0f : -1.0f),
         referee_(referee),
         rotor_ff_enabled_(rotor_ff_enabled),
+        yaw_manual_controller_(yaw_manual_controller),
+        yaw_ai_controller_(yaw_ai_controller),
         yaw_lqr_eso_config_(yaw_lqr_eso),
+        yaw_smc_config_(yaw_smc),
         chassis_gyro_z_topic_(LibXR::Topic::FindOrCreate<float>(
             "chassis_gyro_z", nullptr, false)),
         dualboard_chassis_mode_topic_(LibXR::Topic::FindOrCreate<uint32_t>(
@@ -200,6 +239,7 @@ class Gimbal : public LibXR::Application {
           UNUSED(in_isr);
           UNUSED(event_id);
           gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
+          gimbal->SetVisionTask(GimbalEvent::SET_VISION_IDLE);
         },
         this);
 
@@ -208,6 +248,7 @@ class Gimbal : public LibXR::Application {
           UNUSED(in_isr);
           UNUSED(event_id);
           gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
+          gimbal->SetVisionTask(GimbalEvent::SET_VISION_IDLE);
         },
         this);
 
@@ -215,6 +256,12 @@ class Gimbal : public LibXR::Application {
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
           gimbal->SetMode(static_cast<GimbalEvent>(event_id));
+        },
+        this);
+    auto vision_callback = LibXR::Callback<uint32_t>::Create(
+        [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
+          UNUSED(in_isr);
+          gimbal->SetVisionTask(static_cast<GimbalEvent>(event_id));
         },
         this);
 
@@ -228,6 +275,11 @@ class Gimbal : public LibXR::Application {
         static_cast<uint32_t>(GimbalEvent::SET_MODE_AUTOPATROL), callback);
     gimbal_event_.Register(
         static_cast<uint32_t>(GimbalEvent::SET_MODE_LOW_SENSITIVITY), callback);
+    for (uint32_t event = static_cast<uint32_t>(GimbalEvent::SET_VISION_IDLE);
+         event <= static_cast<uint32_t>(GimbalEvent::SET_VISION_BIG_BUFF);
+         ++event) {
+      gimbal_event_.Register(event, vision_callback);
+    }
   };
 
   /**
@@ -304,6 +356,8 @@ class Gimbal : public LibXR::Application {
 
     topic_yaw_angle_.Publish(abs_angle_yaw_);
     topic_pit_angle_.Publish(abs_angle_pit_);
+    topic_mode_.Publish(static_cast<uint8_t>(current_mode_));
+    topic_vision_task_.Publish(vision_task_);
   }
 
   /**
@@ -326,7 +380,7 @@ class Gimbal : public LibXR::Application {
       target_pit_ddot_ = cmd_data_.pit_ddot;
     } else if (!OPERATOR_CONTROL && AUTOPATROL) {
       target_pit_cmd_ -=
-          patrol_range_ * (2 / M_PI) *
+          patrol_range_ * (2 / LibXR::PI) *
           asin(sin(patrol_omega_ *
                    (LibXR::Timebase::GetMilliseconds() - patrol_start_time))) /
           1000.0f;
@@ -441,6 +495,10 @@ class Gimbal : public LibXR::Application {
       LibXR::Topic::CreateTopic<float>("yawmotor_angle");
   LibXR::Topic topic_pit_angle_ =
       LibXR::Topic::CreateTopic<float>("pitchmotor_angle");
+  LibXR::Topic topic_mode_ = LibXR::Topic::CreateTopic<uint8_t>("gimbal_mode");
+  LibXR::Topic topic_vision_task_ =
+      LibXR::Topic::CreateTopic<uint8_t>("vision_task");
+  uint8_t vision_task_ = 0U;
 
   float pit_max_angle_ = 0.0f;
   float pit_min_angle_ = 0.0f;
@@ -471,10 +529,18 @@ class Gimbal : public LibXR::Application {
   LibXR::MicrosecondTimestamp last_online_time_;
   Referee* referee_;
   bool rotor_ff_enabled_ = false;
+  YawManualController yaw_manual_controller_ = YawManualController::PID;
+  YawAiController yaw_ai_controller_ = YawAiController::LQR_ESO;
   YawLqrEso::Config yaw_lqr_eso_config_{};
   YawLqrEso yaw_lqr_eso_{};
+  YawSmc::Config yaw_smc_config_{};
+  YawSmc yaw_smc_{};
   bool ai_yaw_active_ = false;
   bool yaw_lqr_eso_reset_pending_ = true;
+  bool yaw_smc_reset_pending_ = true;
+  bool previous_smc_ai_yaw_active_ = false;
+  bool previous_yaw_used_smc_ = false;
+  bool previous_ai_used_lqr_ = false;
   float last_submitted_yaw_torque_nm_ = 0.0f;
   bool last_submitted_yaw_torque_valid_ = false;
   float chassis_gyro_z_ = 0.0f;
@@ -531,6 +597,7 @@ class Gimbal : public LibXR::Application {
       last_submitted_yaw_torque_nm_ = command.torque;
       last_submitted_yaw_torque_valid_ = true;
       yaw_lqr_eso_.CommitAppliedTorque(command.torque);
+      yaw_smc_.CommitAppliedTorque(command.torque);
     }
   }
 
@@ -553,8 +620,26 @@ class Gimbal : public LibXR::Application {
         pid_pit_omega_.Calculate(TARGET_PIT_OMEGA, gyro_data_.y(), dt_);
     last_pit_angle_loop_omega_ = PIT_ANGLE_LOOP_OMEGA;
 
+    const bool NEXT_USES_SMC =
+        ai_yaw_active_ ? yaw_ai_controller_ == YawAiController::SMC
+                       : yaw_manual_controller_ == YawManualController::SMC;
+    if (NEXT_USES_SMC && (ai_yaw_active_ != previous_smc_ai_yaw_active_ ||
+                          !previous_yaw_used_smc_)) {
+      yaw_smc_reset_pending_ = true;
+    }
+    if (ai_yaw_active_ && yaw_ai_controller_ == YawAiController::LQR_ESO &&
+        !previous_ai_used_lqr_) {
+      yaw_lqr_eso_reset_pending_ = true;
+    }
+    previous_smc_ai_yaw_active_ = ai_yaw_active_;
+    previous_yaw_used_smc_ = NEXT_USES_SMC;
+    previous_ai_used_lqr_ =
+        ai_yaw_active_ && yaw_ai_controller_ == YawAiController::LQR_ESO;
+
     if (ai_yaw_active_) {
       SolveAiYaw();
+    } else if (yaw_manual_controller_ == YawManualController::SMC) {
+      SolveManualYawSmc();
     } else {
       SolveLegacyYaw();
     }
@@ -581,6 +666,14 @@ class Gimbal : public LibXR::Application {
   }
 
   void SolveAiYaw() {
+    if (yaw_ai_controller_ == YawAiController::SMC) {
+      SolveAiYawSmc();
+    } else {
+      SolveAiYawLqrEso();
+    }
+  }
+
+  void SolveAiYawLqrEso() {
     if (yaw_lqr_eso_reset_pending_) {
       const float PREVIOUS_TORQUE = last_submitted_yaw_torque_valid_
                                         ? last_submitted_yaw_torque_nm_
@@ -606,6 +699,40 @@ class Gimbal : public LibXR::Application {
     }
     yaw_lqr_eso_reset_pending_ = false;
     yaw_output_ = YAW_LQR_ESO_OUTPUT.tau_cmd_nm;
+  }
+
+  void SolveAiYawSmc() {
+    SolveSmcYaw(cmd_data_.yaw, cmd_data_.yaw_dot, cmd_data_.yaw_ddot);
+  }
+
+  void SolveManualYawSmc() {
+    SolveSmcYaw(static_cast<float>(target_yaw_cmd_), target_yaw_dot_,
+                target_yaw_ddot_);
+  }
+
+  void SolveSmcYaw(float theta_ref, float omega_ref, float alpha_ref) {
+    if (yaw_smc_reset_pending_) {
+      const float PREVIOUS_TORQUE = last_submitted_yaw_torque_valid_
+                                        ? last_submitted_yaw_torque_nm_
+                                        : 0.0f;
+      yaw_smc_.Reset(euler_.Yaw(), gyro_data_.z(), PREVIOUS_TORQUE);
+    }
+    const auto YAW_SMC_OUTPUT =
+        yaw_smc_.Calculate(yaw_smc_config_,
+                           {.theta_rad = theta_ref,
+                            .omega_rad_s = omega_ref,
+                            .alpha_rad_s2 = alpha_ref},
+                           {.theta_rad = euler_.Yaw(),
+                            .omega_rad_s = gyro_data_.z(),
+                            .valid = motor_feedback_online_},
+                           dt_);
+    if (!YAW_SMC_OUTPUT.valid || !std::isfinite(YAW_SMC_OUTPUT.tau_cmd_nm)) {
+      yaw_output_ = 0.0f;
+      yaw_smc_reset_pending_ = true;
+      return;
+    }
+    yaw_smc_reset_pending_ = false;
+    yaw_output_ = YAW_SMC_OUTPUT.tau_cmd_nm;
   }
 
   /**
@@ -634,6 +761,10 @@ class Gimbal : public LibXR::Application {
     yaw_output_ = 0.0f;
     last_pit_angle_loop_omega_ = 0.0f;
     last_yaw_angle_loop_omega_ = 0.0f;
+    yaw_smc_reset_pending_ = true;
+    yaw_lqr_eso_reset_pending_ = true;
+    previous_yaw_used_smc_ = false;
+    previous_ai_used_lqr_ = false;
 
     switch (gimbal_event) {
       case GimbalEvent::SET_MODE_RELAX:
@@ -690,5 +821,13 @@ class Gimbal : public LibXR::Application {
       default:
         break;
     }
+  }
+
+  void SetVisionTask(GimbalEvent event) {
+    const auto value = static_cast<uint8_t>(event);
+    const auto first = static_cast<uint8_t>(GimbalEvent::SET_VISION_IDLE);
+    const auto last = static_cast<uint8_t>(GimbalEvent::SET_VISION_BIG_BUFF);
+    if (value < first || value > last) return;
+    vision_task_ = static_cast<uint8_t>(value - first);
   }
 };
