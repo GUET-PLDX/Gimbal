@@ -356,7 +356,8 @@ class Gimbal : public LibXR::Application {
 
     topic_yaw_angle_.Publish(abs_angle_yaw_);
     topic_pit_angle_.Publish(abs_angle_pit_);
-    topic_mode_.Publish(static_cast<uint8_t>(current_mode_));
+    uint8_t mode = static_cast<uint8_t>(current_mode_);
+    topic_mode_.Publish(mode);
     topic_vision_task_.Publish(vision_task_);
   }
 
