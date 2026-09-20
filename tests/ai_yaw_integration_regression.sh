@@ -163,8 +163,8 @@ need_count 'const auto CTRL_MODE = cmd_\.GetCtrlMode\(\);' 1 \
 need_count 'const bool AI_GIMBAL_ACTIVE = cmd_\.GetAIGimbalStatus\(\);' 1 \
   'one local AI Gimbal status sample'
 need_multiline \
-  'const bool AI_YAW_ACTIVE =\s*CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && AI_GIMBAL_ACTIVE;' \
-  'local CMD-based AI selection'
+  'const bool AI_YAW_ACTIVE =\s*CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL &&\s*AI_GIMBAL_ACTIVE && VISION_MODE;' \
+  'local CMD and vision-mode AI selection'
 need 'ai_yaw_active_ = AI_YAW_ACTIVE' 'direct AI active-state assignment'
 need_multiline \
   'if \(yaw_ai_controller_ == YawAiController::SMC\) \{\s*SolveAiYawSmc\(yaw_output\);\s*\} else \{\s*SolveAiYawLqrEso\(yaw_output\);\s*\}' \
@@ -210,7 +210,7 @@ need_multiline \
   'yaw_smc_reset_pending_ = false;\s*yaw_output = YAW_SMC_OUTPUT\.tau_cmd_nm;' \
   'valid sliding-mode calculation clears reset before motor submission'
 need_multiline \
-  'if \(ai_yaw_active_\) \{\s*SolveAiYaw\(yaw_output\);\s*\} else if \(yaw_manual_controller_ == YawManualController::SMC\) \{\s*SolveManualYawSmc\(yaw_output\);\s*\} else \{\s*SolveLegacyYaw\(yaw_output\);\s*\}' \
+  'if \(ai_yaw_active_\) \{\s*SolveAiYaw\(yaw_output\);\s*\} else if \(yaw_manual_controller_ == YawManualController::SMC\) \{\s*SolveManualYawSmc\(yaw_output\);\s*\} else \{\s*SolvePidYaw\(yaw_output\);\s*\}' \
   'independent manual and AI Yaw solve selection'
 forbid_file "${HEADER}" 'YawManualController::LQR_ESO' \
   'LQR/ESO is not a manual Yaw controller option'
@@ -228,7 +228,7 @@ forbid_in_lines \
   '/\*\*' \
   'yaw_lqr_eso_reset_pending_|InvalidateYawControllerState' \
   'motor-not-ready submission must not rearm the controller after a valid AI calculation'
-forbid_file "${HEADER}" 'ResetLegacyYawToCurrent|InvalidateYawControllerState' \
+forbid_file "${HEADER}" 'ResetPidYawToCurrent|InvalidateYawControllerState' \
   'controller transition reset helpers'
 
 need_count 'motor_yaw_->Control\(' 1 'one Yaw submission site'

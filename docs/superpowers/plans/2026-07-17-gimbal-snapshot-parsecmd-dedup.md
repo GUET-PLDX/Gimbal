@@ -4,7 +4,7 @@
 
 **Goal:** Remove four unnecessary snapshot members, then simplify `Gimbal::ParseCMD()` without changing any command behavior.
 
-**Architecture:** Keep all target generation inside `Gimbal`, replace per-loop snapshots with local constants, and organize `ParseCMD()` into fact capture, Pitch update, and legacy Yaw update phases. Lock every existing branch with static characterization checks before rewriting the function.
+**Architecture:** Keep all target generation inside `Gimbal`, replace per-loop snapshots with local constants, and organize `ParseCMD()` into fact capture, Pitch update, and PID Yaw update phases. Lock every existing branch with static characterization checks before rewriting the function.
 
 **Tech Stack:** C++17/20 header-only module code, LibXR topics and PID, Python 3 static regression scripts, Bash regression runners, clang-format 21.1.8, STM32 `tools/build.sh` pipeline.
 
@@ -204,7 +204,7 @@ required = {
         r"SET_MODE_AUTOPATROL.*?target_yaw_cmd_\s*\+=\s*1\.0f\s*\*\s*dt_;",
     "negative automatic Yaw":
         r"YAW_OPERATOR_RATE\s*=\s*-cmd_data_\.yaw\s*\*\s*GIMBAL_MAX_SPEED;",
-    "AI bypasses legacy Yaw":
+    "AI bypasses PID Yaw":
         r"if\s*\(\s*!ai_yaw_active_\s*\)|"
         r"if\s*\(\s*AI_YAW_ACTIVE\s*\)\s*\{\s*return\s*;",
 }

@@ -182,8 +182,9 @@ PITCH_RATE = (
 PATROL_PITCH = (
     r"const float ELAPSED_S = static_cast<float>\(\s*\(LibXR::Timebase::GetMilliseconds\(\) - "
     r"patrol_start_time_\)\s*\.ToMillisecond\(\)\) / 1000\.0f; "
-    r"target_pit_cmd_ = PatrolTrajectory::PitchTarget\(\s*patrol_pitch_center_rad_, "
-    r"patrol_pitch_amplitude_rad_, patrol_pitch_angular_rate_rad_s_, ELAPSED_S\); "
+    r"constexpr float TWO_OVER_PI = 0\.6366197723675814f; "
+    r"target_pit_cmd_ = patrol_pitch_center_rad_ \+ patrol_pitch_amplitude_rad_ \* TWO_OVER_PI \* "
+    r"std::asin\(std::sin\(patrol_pitch_angular_rate_rad_s_ \* ELAPSED_S\)\); "
     r"target_pit_dot_ = 0\.0f; "
     r"target_pit_ddot_ = 0\.0f;"
 )
@@ -201,7 +202,8 @@ def characterize(source):
         ("operator control fact", r"const bool OPERATOR_CONTROL = CTRL_MODE == CMD::Mode::CMD_OP_CTRL;"),
         ("low-sensitivity fact", r"const bool LOW_SENSITIVITY = current_mode_ == GimbalEvent::SET_MODE_LOW_SENSITIVITY;"),
         ("autopatrol fact", r"const bool AUTOPATROL = current_mode_ == GimbalEvent::SET_MODE_AUTOPATROL;"),
-        ("AI Yaw activation condition", r"const bool AI_YAW_ACTIVE = CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && AI_GIMBAL_ACTIVE; ai_yaw_active_ = AI_YAW_ACTIVE;"),
+        ("AI vision-mode activation condition", r"const bool VISION_MODE = current_mode_ == GimbalEvent::SET_VISION_AUTO_AIM \|\| current_mode_ == GimbalEvent::SET_VISION_SMALL_BUFF \|\| current_mode_ == GimbalEvent::SET_VISION_BIG_BUFF;"),
+        ("AI Yaw activation condition", r"const bool AI_YAW_ACTIVE = CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && AI_GIMBAL_ACTIVE && VISION_MODE; ai_yaw_active_ = AI_YAW_ACTIVE;"),
     ):
         require(description, pattern, body)
 
@@ -243,7 +245,7 @@ def characterize(source):
     automatic_yaw = following_else(yaw_tail, patrol_yaw)
     require(
         "non-AI automatic Yaw behavior",
-        r"const float YAW_OPERATOR_RATE = -cmd_data_\.yaw \* GIMBAL_MAX_SPEED; " + YAW_RATE,
+        r"const float YAW_OPERATOR_RATE = cmd_data_\.yaw \* GIMBAL_MAX_SPEED; " + YAW_RATE,
         automatic_yaw.body,
     )
     if not compact(yaw_tail[automatic_yaw.end :]).startswith("target_yaw_ddot_ = 0.0f;"):
@@ -265,7 +267,6 @@ def characterize(source):
 MUTATIONS = (
     Mutation("operator Pitch low sensitivity", "OPERATOR_CONTROL && LOW_SENSITIVITY ? 0.1f : 1.0f", "OPERATOR_CONTROL && LOW_SENSITIVITY ? 0.2f : 1.0f", "missing: operator and non-AI automatic Pitch behavior"),
     Mutation("operator Pitch normal formula", "cmd_data_.pit * GIMBAL_MAX_SPEED * PITCH_SENSITIVITY", "cmd_data_.pit * PITCH_SENSITIVITY", "missing: operator and non-AI automatic Pitch behavior"),
-    Mutation("patrol Pitch absolute target", "target_pit_cmd_ = PatrolTrajectory::PitchTarget(", "target_pit_cmd_ += PatrolTrajectory::PitchTarget(", "missing: patrol Pitch behavior"),
     Mutation("AI Pitch branch", "if (AI_YAW_ACTIVE) {", "if (!AI_YAW_ACTIVE) {", "missing: AI absolute Pitch behavior", "first"),
     Mutation("non-AI automatic Pitch usage", "target_pit_dot_ = PIT_OPERATOR_RATE;", "target_pit_dot_ = -PIT_OPERATOR_RATE;", "missing: operator and non-AI automatic Pitch behavior"),
     Mutation("AI Yaw bypass", "if (AI_YAW_ACTIVE) {", "if (!AI_YAW_ACTIVE) {", "missing: AI Yaw bypass", "last"),
@@ -274,7 +275,7 @@ MUTATIONS = (
     Mutation("operator Yaw usage", "target_yaw_dot_ = YAW_OPERATOR_RATE;", "target_yaw_dot_ = -YAW_OPERATOR_RATE;", "missing: operator Yaw low and normal sensitivity behavior", "first"),
     Mutation("extra operator Yaw target write", "target_yaw_dot_ = YAW_OPERATOR_RATE;", "target_yaw_dot_ = YAW_OPERATOR_RATE;\n      ++target_yaw_cmd_;", "missing: exact phased Yaw target writes", "first"),
     Mutation("patrol Yaw", "target_yaw_dot_ = patrol_yaw_rate_rad_s_;", "target_yaw_dot_ = 2.0f;", "missing: patrol Yaw behavior"),
-    Mutation("automatic Yaw sign", "-cmd_data_.yaw * GIMBAL_MAX_SPEED", "cmd_data_.yaw * GIMBAL_MAX_SPEED", "missing: non-AI automatic Yaw behavior"),
+    Mutation("automatic Yaw sign", "const float YAW_OPERATOR_RATE = cmd_data_.yaw * GIMBAL_MAX_SPEED;", "const float YAW_OPERATOR_RATE = -cmd_data_.yaw * GIMBAL_MAX_SPEED;", "missing: non-AI automatic Yaw behavior"),
     Mutation("automatic Yaw usage", "target_yaw_dot_ = YAW_OPERATOR_RATE;", "target_yaw_dot_ = -YAW_OPERATOR_RATE;", "missing: non-AI automatic Yaw behavior", "last"),
     Mutation("shared Yaw acceleration reset", "target_yaw_ddot_ = 0.0f;\n  }", "if (OPERATOR_CONTROL) {\n      target_yaw_ddot_ = 0.0f;\n    }\n  }", "missing: unconditional shared Yaw acceleration reset"),
 )

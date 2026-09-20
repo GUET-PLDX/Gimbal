@@ -22,7 +22,8 @@ The refactor must preserve all current command semantics:
   leaves Yaw target generation to `YawLqrEso`.
 - Automatic patrol preserves the existing Pitch patrol expression and the
   `+1.0f` Yaw rate.
-- Non-AI automatic control preserves the current negative Yaw input direction.
+- Non-AI automatic control integrates the Yaw command as a rate with the same
+  sign as operator control.
 - Pitch target processing remains before Yaw target processing.
 - The retained motor-feedback guard, rotor feedforward, target derivative
   feedforward, and AI controller behavior remain unchanged.
@@ -64,10 +65,11 @@ Use one function with three explicit phases:
    - AI active: assign absolute position, velocity, and acceleration.
    - Automatic patrol: apply the existing patrol expression.
    - Otherwise: calculate one Pitch operator rate and integrate it.
-3. Update the legacy Yaw target only when AI Yaw is inactive:
+3. Update the PID Yaw target only when AI Yaw is inactive:
    - Operator control: integrate the input rate with the existing sensitivity.
    - Automatic patrol: integrate `+1.0f`.
-   - Other automatic control: integrate the negated input rate.
+   - Other automatic control: integrate the input rate with the same sign as
+     operator control, without low-sensitivity scaling.
 
 This removes duplicated rate assignment without introducing helpers, policy
 tables, or additional persistent state.
@@ -90,8 +92,8 @@ branch listed under Required Behavior before production code changes.
 
 ## Risks
 
-- Combining branches can accidentally change the sign of non-AI automatic Yaw
-  input.
+- Combining branches can accidentally apply operator low-sensitivity scaling
+  to non-AI automatic Yaw.
 - A shared sensitivity calculation can incorrectly apply low sensitivity
   outside operator control.
 - Reordering Pitch and Yaw work can change which command state reaches the

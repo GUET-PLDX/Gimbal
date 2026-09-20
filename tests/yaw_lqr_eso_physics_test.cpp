@@ -121,8 +121,8 @@ static void test_exact_zoh_plant() {
   CHECK_NEAR_DOUBLE(DAMPED.omega, EXPECTED_OMEGA, 1.0e-14);
 }
 
-static void test_legacy_adapter_first_tick() {
-  LegacyYawAdapter adapter;
+static void test_pid_adapter_first_tick() {
+  PidYawAdapter adapter;
   adapter.Reset();
   constexpr ReferenceSample REFERENCE{.theta = 0.1, .omega = 0.0, .alpha = 0.0};
   CHECK_NEAR_DOUBLE(adapter.Calculate(REFERENCE, 0.0, 0.0, 0.002), 1.6,
@@ -240,7 +240,7 @@ int main() {
   test_minimum_jerk_boundary_conditions();
   test_general_quintic_boundary_conditions();
   test_exact_zoh_plant();
-  test_legacy_adapter_first_tick();
+  test_pid_adapter_first_tick();
   test_time_weighted_metrics();
   test_phase_fit();
   return yaw_test_failures == 0 ? 0 : 1;

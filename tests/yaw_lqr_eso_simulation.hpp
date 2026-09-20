@@ -169,7 +169,7 @@ inline double wrap_pi(double angle) {
   return wrapped - LibXR::PI;
 }
 
-class LegacyYawAdapter final {
+class PidYawAdapter final {
  public:
   void Reset() { last_angle_loop_ = 0.0; }
 

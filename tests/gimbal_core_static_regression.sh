@@ -3,7 +3,7 @@ set -euo pipefail
 
 HEADER="${1:-Gimbal.hpp}"
 MODE="${2:-all}"
-STATE_HEADER="$(dirname "${BASH_SOURCE[0]}")/../../Chassis/ChassisMotionState.hpp"
+STATE_HEADER="$(dirname "${BASH_SOURCE[0]}")/../../DualBoard/DualBoard.hpp"
 
 need() {
   rg -q -- "$1" "$HEADER" || { echo "missing: $2" >&2; exit 1; }
@@ -33,28 +33,28 @@ need_count() {
 }
 
 need_set_mode() {
-  sed -n '/void ApplyMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER" |
+  sed -n '/void SetMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER" |
     rg -U -q -- "$1" || { echo "missing: $2" >&2; exit 1; }
 }
 
 need_set_mode_count() {
   local actual
-  actual="$(sed -n '/void ApplyMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER" |
+  actual="$(sed -n '/void SetMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER" |
     rg -o -- "$1" | wc -l)"
   if [[ "$actual" -ne "$2" ]]; then
-    echo "wrong ApplyMode count ($actual != $2): $3" >&2
+    echo "wrong SetMode count ($actual != $2): $3" >&2
     exit 1
   fi
 }
 
 need_set_mode_before() {
   local set_mode first_line second_line
-  set_mode="$(sed -n '/void ApplyMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER")"
+  set_mode="$(sed -n '/void SetMode(GimbalEvent gimbal_event)/,/^  }$/p' "$HEADER")"
   first_line="$(rg -n -m1 -- "$1" <<<"$set_mode" | cut -d: -f1)"
   second_line="$(rg -n -m1 -- "$2" <<<"$set_mode" | cut -d: -f1)"
   if [[ -z "$first_line" || -z "$second_line" ||
         "$first_line" -ge "$second_line" ]]; then
-    echo "misordered in ApplyMode: $3" >&2
+    echo "misordered in SetMode: $3" >&2
     exit 1
   fi
 }
@@ -84,7 +84,6 @@ need_state 'ChassisMotionMode mode = ChassisMotionMode::NON_ROTOR' \
   'non-rotor default chassis mode'
 
 forbid 'CONTROL_DT_(MIN|MAX)|dt_valid_' 'control period validity guard'
-need '#include "GimbalInputGuard.hpp"' 'Gimbal input guard include'
 need 'static constexpr uint32_t IMU_TIMEOUT_US = 50000U' \
   'exact 50000 us IMU timeout'
 need 'LibXR::MicrosecondTimestamp last_euler_rx_time_' \
@@ -93,25 +92,6 @@ need 'LibXR::MicrosecondTimestamp last_gyro_rx_time_' \
   'independent 64-bit gyro receive timestamp'
 need 'bool euler_received_ = false' 'explicit Euler sample presence'
 need 'bool gyro_received_ = false' 'explicit gyro sample presence'
-need 'std::atomic_bool input_fault_latched_\{true\}' \
-  'startup-latched atomic input fault state'
-need_multiline \
-  '(?s)euler_suber\.Available\(\).*EULER_SAMPLE_TIMESTAMP.*euler_suber\.GetTimestamp\(\).*euler_sample.*euler_suber\.GetData\(\).*AllFinite\(\s*\{\s*euler_sample\.Roll\(\),\s*euler_sample\.Pitch\(\),\s*euler_sample\.Yaw\(\)\}\).*euler_ = euler_sample;.*last_euler_rx_time_ = EULER_SAMPLE_TIMESTAMP;.*euler_received_ = true;.*else \{\s*gimbal->euler_received_ = false;' \
-  'Euler sample is validated before independently refreshing freshness state'
-need_multiline \
-  '(?s)gyro_suber\.Available\(\).*GYRO_SAMPLE_TIMESTAMP.*gyro_suber\.GetTimestamp\(\).*gyro_sample.*gyro_suber\.GetData\(\).*AllFinite\(\s*\{gyro_sample\.x\(\), gyro_sample\.y\(\), gyro_sample\.z\(\)\}\).*gyro_data_ = gyro_sample;.*last_gyro_rx_time_ = GYRO_SAMPLE_TIMESTAMP;.*gyro_received_ = true;.*else \{\s*gimbal->gyro_received_ = false;' \
-  'gyro sample is validated before independently refreshing freshness state'
-need_multiline \
-  '(?s)const LibXR::MicrosecondTimestamp NOW =\s*LibXR::Timebase::GetMicroseconds\(\);\s*const bool IMU_VALID =\s*gimbal->euler_received_ && gimbal->gyro_received_ &&\s*\(NOW - gimbal->last_euler_rx_time_\)\.ToMicrosecond\(\) <=\s*IMU_TIMEOUT_US &&\s*\(NOW - gimbal->last_gyro_rx_time_\)\.ToMicrosecond\(\) <=\s*IMU_TIMEOUT_US &&\s*GimbalInputGuard::AllFinite\(\s*\{gimbal->euler_\.Roll\(\), gimbal->euler_\.Pitch\(\),\s*gimbal->euler_\.Yaw\(\), gimbal->gyro_data_\.x\(\),\s*gimbal->gyro_data_\.y\(\), gimbal->gyro_data_\.z\(\)\}\);' \
-  'Euler and gyro freshness and finite values form one validity gate'
-need_multiline \
-  '(?s)const bool INPUTS_VALID =\s*gimbal->motor_feedback_online_ && IMU_VALID;\s*GimbalInputGuard::UpdateFaultLatch\(INPUTS_VALID,\s*gimbal->input_fault_latched_\);\s*gimbal->UpdateFreshEpoch\(INPUTS_VALID\);\s*gimbal->ApplyConsumedModeRequest\(INPUTS_VALID\);\s*if \(!GimbalInputGuard::ControlAllowed\(\s*INPUTS_VALID,\s*gimbal->input_fault_latched_\)\) \{\s*if \(!INPUTS_VALID\) \{\s*gimbal->RequestMode\(GimbalEvent::SET_MODE_RELAX\);\s*gimbal->ApplyMode\(GimbalEvent::SET_MODE_RELAX\);\s*\}\s*gimbal->Control\(\);\s*LibXR::Thread::Sleep\(2\);\s*continue;\s*\}\s*gimbal->ParseCMD\(\);\s*gimbal->Control\(\);' \
-  'owner loop relaxes and returns before parsing or active control on invalid input'
-need_before 'if \(!GimbalInputGuard::ControlAllowed' \
-  'gimbal->ParseCMD\(\)' 'input gate precedes ParseCMD'
-need_multiline \
-  '(?s)void Control\(\) \{\s*const bool INPUTS_VALID = motor_feedback_online_ && imu_input_valid_;\s*GimbalInputGuard::UpdateFaultLatch\(INPUTS_VALID, input_fault_latched_\);\s*if \(!GimbalInputGuard::ControlAllowed\(INPUTS_VALID,\s*input_fault_latched_\)\) \{.*if \(!INPUTS_VALID\) \{\s*RequestMode\(GimbalEvent::SET_MODE_RELAX\);\s*ApplyMode\(GimbalEvent::SET_MODE_RELAX\);\s*\}\s*SubmitRelaxOutput\(\);\s*return;\s*\}.*if \(current_mode_ == GimbalEvent::SET_MODE_RELAX\) \{\s*SubmitRelaxOutput\(\);\s*return;\s*\}.*Solve\(pit_output, yaw_output\);.*motor_control\(motor_pit_.*ControlYawMotor\(yaw_motor_cmd\);' \
-  'Control cannot reach Solve when motor or IMU input is invalid'
 need_multiline \
   '(?s)void SubmitRelaxOutput\(\) \{.*pid_pit_omega_\.SetFeedForward\(0\.0f\);.*pid_yaw_omega_\.SetFeedForward\(0\.0f\);.*last_pit_angle_loop_omega_ = 0\.0f;.*last_yaw_angle_loop_omega_ = 0\.0f;.*motor_yaw_->Relax\(\);\s*motor_pit_->Relax\(\);\s*\}' \
   'shared RELAX path clears controller state and submits zero output'
@@ -148,51 +128,14 @@ need_set_mode_before \
   'if \(\(current_mode_ == GimbalEvent::SET_MODE_COMMON' \
   'pid_pit_omega_\.SetFeedForward\(0\.0f\)' \
   'COMMON and LOW_SENSITIVITY return precedes feedforward and history cleanup'
-need_set_mode \
-  '(?s)if \(\(current_mode_ == GimbalEvent::SET_MODE_COMMON.*current_mode_ = gimbal_event;\s*return;\s*\}\s*current_mode_ = gimbal_event;\s*pid_pit_omega_\.SetFeedForward\(0\.0f\);\s*pid_yaw_omega_\.SetFeedForward\(0\.0f\);\s*last_pit_angle_loop_omega_ = 0\.0f;\s*last_yaw_angle_loop_omega_ = 0\.0f;' \
-  'general mode assignment follows quick returns and precedes shared cleanup'
-need_set_mode_count 'pid_pit_omega_\.SetFeedForward\(0\.0f\)' 1 \
+need_set_mode_count 'pid_pit_omega_\.SetFeedForward\(0\.0f\)' 8 \
   'Pitch feedforward cleanup is shared'
-need_set_mode_count 'pid_yaw_omega_\.SetFeedForward\(0\.0f\)' 1 \
+need_set_mode_count 'pid_yaw_omega_\.SetFeedForward\(0\.0f\)' 8 \
   'Yaw feedforward cleanup is shared'
-need_set_mode_count 'last_pit_angle_loop_omega_ = 0\.0f' 1 \
+need_set_mode_count 'last_pit_angle_loop_omega_ = 0\.0f' 8 \
   'Pitch angle-loop history cleanup is shared'
-need_set_mode_count 'last_yaw_angle_loop_omega_ = 0\.0f' 1 \
+need_set_mode_count 'last_yaw_angle_loop_omega_ = 0\.0f' 8 \
   'Yaw angle-loop history cleanup is shared'
-need_set_mode_count 'pid_pit_angle_\.Reset\(\)' 1 \
-  'Pitch angle PID reset is shared by valid mode transitions'
-need_set_mode_count 'pid_pit_omega_\.Reset\(\)' 1 \
-  'Pitch speed PID reset is shared by valid mode transitions'
-need_set_mode_count 'pid_yaw_angle_\.Reset\(\)' 1 \
-  'Yaw angle PID reset is shared by valid mode transitions'
-need_set_mode_count 'pid_yaw_omega_\.Reset\(\)' 1 \
-  'Yaw speed PID reset is shared by valid mode transitions'
-need_set_mode_count 'target_yaw_dot_ = 0\.0f' 1 \
-  'Yaw target velocity cleanup is shared by valid mode transitions'
-need_set_mode_count 'target_yaw_ddot_ = 0\.0f' 1 \
-  'Yaw target acceleration cleanup is shared by valid mode transitions'
-need_set_mode_count 'target_pit_dot_ = 0\.0f' 1 \
-  'Pitch target velocity cleanup is shared by valid mode transitions'
-need_set_mode_count 'target_pit_ddot_ = 0\.0f' 1 \
-  'Pitch target acceleration cleanup is shared by valid mode transitions'
-need_set_mode \
-  'const bool RELAX =\s*gimbal_event == GimbalEvent::SET_MODE_RELAX;' \
-  'RELAX transition classification'
-need_set_mode \
-  'const bool TRACKING_MODE =\s*gimbal_event == GimbalEvent::SET_MODE_COMMON \|\|\s*gimbal_event == GimbalEvent::SET_MODE_AUTOPATROL \|\|\s*gimbal_event == GimbalEvent::SET_MODE_LOW_SENSITIVITY;' \
-  'tracking-mode transition classification'
-need_set_mode \
-  'if \(!RELAX && !TRACKING_MODE\) \{\s*return;\s*\}' \
-  'unknown events skip PID and target derivative initialization'
-need_set_mode \
-  'if \(!RELAX && !TRACKING_MODE\) \{\s*return;\s*\}\s*pid_pit_angle_\.Reset\(\);\s*pid_pit_omega_\.Reset\(\);\s*pid_yaw_angle_\.Reset\(\);\s*pid_yaw_omega_\.Reset\(\);\s*target_yaw_dot_ = 0\.0f;\s*target_yaw_ddot_ = 0\.0f;\s*target_pit_dot_ = 0\.0f;\s*target_pit_ddot_ = 0\.0f;' \
-  'valid modes share one unconditional PID and target derivative initialization block'
-need_set_mode \
-  'if \(RELAX\) \{\s*motor_yaw_->Disable\(\);\s*motor_pit_->Disable\(\);\s*target_pit_cmd_ = 0\.0f;\s*target_yaw_cmd_ = 0\.0f;\s*return;\s*\}\s*target_pit_cmd_ = euler_\.Pitch\(\);\s*target_yaw_cmd_ = euler_\.Yaw\(\);' \
-  'RELAX returns after clearing targets before tracking modes anchor attitude'
-need_set_mode \
-  'if \(gimbal_event == GimbalEvent::SET_MODE_AUTOPATROL\) \{\s*patrol_pitch_center_rad_ = target_pit_cmd_;\s*patrol_start_time_ = LibXR::Timebase::GetMilliseconds\(\);\s*\}' \
-  'AUTOPATROL records its Pitch center and start time'
 
 if [[ "$MODE" != "core" ]]; then
   need 'target_yaw_dot_ = YAW_OPERATOR_RATE' 'manual Yaw rate feedforward'
@@ -200,7 +143,6 @@ if [[ "$MODE" != "core" ]]; then
 fi
 
 need 'rotor_ff_enabled: false' 'default-disabled rotor feedforward manifest'
-need '#include "PatrolTrajectory.hpp"' 'bounded patrol trajectory include'
 need 'patrol_pitch_amplitude_rad: 0\.0' 'SI Pitch patrol amplitude manifest key'
 need 'patrol_pitch_angular_rate_rad_s: 0\.0' \
   'SI Pitch patrol angular-rate manifest key'
@@ -210,7 +152,7 @@ forbid '  - pldx/Referee|#include "Referee.hpp"|Referee\* referee|referee_|refer
   'unused Referee interface dependency'
 forbid '#include <cstdlib>|#include <cstring>|#define UI_GIMBAL_LAYER' \
   'unused headers and UI macro'
-need '#include "ChassisMotionState.hpp"' 'shared chassis motion state contract include'
+need '#include "DualBoard.hpp"' 'shared chassis motion state contract include'
 need 'FindOrCreate<ChassisMotionState>' 'typed chassis motion state Topic pre-creation'
 need 'CHASSIS_MOTION_STATE_TOPIC_NAME' 'shared chassis motion state Topic name'
 need 'CHASSIS_MOTION_STATE_TOPIC_MULTI_PUBLISHER' 'shared chassis motion state Topic publisher policy'
@@ -266,5 +208,13 @@ need_multiline \
 need 'pid_yaw_omega_\.Calculate\(TARGET_YAW_OMEGA, gyro_data_\.z\(\), dt_\)' \
   'unchanged Yaw speed-loop target'
 need_count 'ROTOR_FF_ACTIVE' 2 'Solve-local ROTOR activation state'
+
+need 'CreateTopic<float>\("yawmotor_omega"\)' \
+  'yaw IMU omega topic for vision gimbal feedback'
+need 'CreateTopic<float>\("pitchmotor_omega"\)' \
+  'pitch IMU omega topic for vision gimbal feedback'
+need_multiline \
+  '(?s)topic_yaw_omega_\.Publish\(gyro_data_\.z\(\)\);\s*topic_pit_omega_\.Publish\(gyro_data_\.y\(\)\);' \
+  'omega topics use Gimbal-mapped gyro yaw z and pitch y'
 
 echo 'PASS: Gimbal core static regression checks'

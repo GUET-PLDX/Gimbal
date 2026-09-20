@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the original Gimbal `j_yaw` parameter the only configured Yaw inertia used by both Legacy Yaw and AI Yaw LQR/ESO.
+**Goal:** Make the original Gimbal `j_yaw` parameter the only configured Yaw inertia used by both PID Yaw and AI Yaw LQR/ESO.
 
 **Architecture:** Remove plant inertia from `YawLqrEso::Config` and pass it explicitly to `ValidateConfig()` and `Calculate()`. `Gimbal::SolveAiYaw()` supplies its existing `j_yaw_`; the controller continues to use that value for acceleration feedforward, ESO input gain, and the ESO viscous model without changing routing or numerical behavior.
 
@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Keep Legacy Pitch and Yaw formulas unchanged.
+- Keep PID Pitch and Yaw formulas unchanged.
 - Keep AI Yaw activation, reset, invalid-output fallback, and torque submission unchanged.
 - Do not merge `yaw_k` with `b_nms_rad`, PID gains with LQR gains, or PID output limits with AI torque limits.
 - Preserve the current numerical inertia value: `j_yaw: 0.03` remains the single configured value.

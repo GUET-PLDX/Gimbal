@@ -5,40 +5,40 @@
 
 ### Yaw SMC/FTSMC 数学约定
 
-`YawSmc` 严格按 `/home/wanqiq/桌面/smc_controller/SMC/slidingmodec.cpp` 的 `SMC_Tick()` 计算顺序移植。工程接口使用 SI 单位：角度为 `rad`，角速度为 `rad/s`，角加速度和力矩字段分别标为 `rad/s^2`、`N*m`。
+`YawSmc` 基于参考工程的 SMC/FTSMC 结构实现，并使用 SI 单位和力矩接口：角度为 `rad`，角速度为 `rad/s`，角加速度为 `rad/s^2`，力矩为 `N*m`。当前实现直接消费调用方提供的目标角度、角速度和角加速度，不使用目标角度的无周期差分。
 
-控制律顺序与 `SMC_Tick()` 一致。Yaw 误差几何与手动 PID 相同，使用 `CycleValue` 最短路（`e = θ − θd`，结果在 `[-π, π]`），避免 `[0, 2π]` 目标与 `atan2` 反馈直接相减走出长弧：
-
-```text
-e = CycleValue(theta) - target
-target_dot = CycleValue(target) - target_last
-target_ddot = target_dot - target_dot_previous
-e_dot = omega - target_dot_previous
-```
-
-`target_dot` 和 `target_ddot` 来自控制器内部的目标历史，`Reference.omega_rad_s`、`Reference.alpha_rad_s2` 仅为兼容公共接口保留，不参与源算法核心计算。死区判断前更新 `target_dot`，只有完成一次非死区、有限值的控制计算后才更新 `target_last`；这些差分仍不按 `dt` 归一化。`Reset()` 用当前反馈角初始化 `target_last`。
-
-当 `abs(e) < error_deadband_rad` 时立即返回零控制量，边界等号仍计算。源代码先计算 FTSMC，随后在 `abs(e) < ftsmc_switch_rad` 时改用线性滑模，等号进入 FTSMC。FTSMC 保留源代码的负误差符号项：
-
-当前 YAML 的 `ftsmc_switch_rad=0.0174533` 是源代码一单位（原始实现中的 1 度）对应的弧度配置值。
+Yaw 误差几何与手动 PID 相同，使用 `CycleValue` 最短路（`e = θ - θd`，结果在 `[-π, π]`），避免 `[0, 2π]` 目标与 `atan2` 反馈直接相减走出长弧：
 
 ```text
-e_qp = sign(e) * abs(e)^(q/p)
-s = e_dot + c * e_qp
-ds = -epsilon * Sat(s) - k * s
-tau_smc = J * (ds - c * (q/p) * e_dot * e_qp / abs(e))
+e = CycleValue(theta) - theta_ref
+e_dot = omega - omega_ref
+tau_ff_alpha = J * alpha_ref
 ```
 
-核心输出为 `tau_pre_limit_nm = tau_ff_alpha_nm + tau_smc_nm`，其中 `tau_ff_alpha_nm = J * target_ddot`。工程随后依次应用软限幅、硬限幅和力矩变化率限制；`tau_cmd_before_slew_nm` 是前两项之后、slew 之前的值，`tau_cmd_nm` 才是提交给电机的最终受保护命令。
+`Reference::theta_rad`、`Reference::omega_rad_s` 和 `Reference::alpha_rad_s2` 均直接参与控制律。调用方负责提供同一参考轨迹的完整运动学状态。
 
-运行时保留源代码的宽松 `p/q` 行为，不增加奇数校验。YAML 中的 `c=20`、`k=120`、`epsilon=0.5`、`J=0.03` 等数值保持为 Mock/初始调参参数，不代表已完成实机物理重整定。
+当 `abs(e) < error_deadband_rad` 时立即返回零控制量，边界等号仍计算。当 `abs(e) >= ftsmc_switch_rad` 时使用 FTSMC，否则使用线性 SMC。FTSMC 的幂次符号函数及其导数为：
+
+```text
+sig_r(e) = sign(e) * abs(e)^r
+r = q / p
+s = e_dot + c * sig_r(e)
+surface_dot_term = c * r * abs(e)^(r - 1) * e_dot
+tau_smc = J * (-surface_dot_term - epsilon * Sat(s) - k * s)
+```
+
+导数项中的 `abs(e)^(r - 1)` 不包含 `sign(e)`，因此正负镜像状态具有一致的动力学。FTSMC 只在远离零点的配置区间使用，以避开 `r < 1` 时的原点奇异性。
+
+核心输出为 `tau_pre_limit_nm = tau_ff_alpha_nm + tau_smc_nm`，其中 `tau_ff_alpha_nm = J * alpha_ref`。工程随后依次应用软限幅、硬限幅和力矩变化率限制；`tau_cmd_before_slew_nm` 是前两项之后、slew 之前的值，`tau_cmd_nm` 才是提交给电机的最终受保护命令。
+
+运行时保留参考代码的宽松 `p/q` 行为，不增加奇数校验。修复参考运动学与 FTSMC 负误差方向后，移动目标和负方向输出会与旧实现不同。升级后应重新执行正负角度阶跃、匀速目标和加速目标测试，再进行实车参数整定。
 
 ## 2. 主要函数说明
 1. ThreadFunc: 云台控制主线程。
 2. ParseCMD: 解析 CMD 输入并更新目标。
 3. Control: 角度环与角速度环计算控制输出。
 4. Update: 刷新电机反馈并发布状态。
-5. RequestMode / ApplyMode / GetEvent: 模式管理与事件接口。
+5. SetMode / GetEvent: 模式管理与事件接口。
 6. DebugCommand: 调试命令入口（Debug 构建）。
 
 ## 3. 接入步骤
@@ -52,6 +52,10 @@ tau_smc = J * (ds - c * (q/p) * e_dot * e_qp / abs(e))
 - `gimbal_euler`：云台 IMU 融合后的欧拉角。
 - `gimbal_gyro`：云台 IMU 原始角速度。
 - `chassis_motion_state`：底盘运动状态（在线、模式、yaw 角速度），供小陀螺模式前馈使用。
+
+云台状态输出 topic：
+- `yawmotor_angle` / `pitchmotor_angle`：电机绝对角，rad。
+- `yawmotor_omega` / `pitchmotor_omega`：与内环同符号的 IMU 实测角速度，rad/s（yaw=`gyro.z`，pitch=`gyro.y` 已按云台约定取反）。仅在陀螺 50 ms 内新鲜时发布。
 
 
 标准命令流程：

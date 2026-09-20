@@ -104,17 +104,15 @@ depends:
   - pldx/CMD
   - pldx/Motor
   - pldx/BMI088
+  - pldx/DualBoard
 === END MANIFEST === */
 // clang-format on
 
-#include <atomic>
 #include <cmath>
 
 #include "CMD.hpp"
-#include "ChassisMotionState.hpp"
-#include "GimbalInputGuard.hpp"
+#include "DualBoard.hpp"
 #include "Motor.hpp"
-#include "PatrolTrajectory.hpp"
 #include "YawLqrEso.hpp"
 #include "YawSmc.hpp"
 #include "app_framework.hpp"
@@ -123,10 +121,14 @@ depends:
 #include "libxr_def.hpp"
 #include "libxr_time.hpp"
 #include "pid.hpp"
-#include "queue.hpp"
 #include "thread.hpp"
 #include "timebase.hpp"
 #include "transform.hpp"
+
+using Pldx::DualBoardControl::CHASSIS_MOTION_STATE_TOPIC_MULTI_PUBLISHER;
+using Pldx::DualBoardControl::CHASSIS_MOTION_STATE_TOPIC_NAME;
+using Pldx::DualBoardControl::ChassisMotionMode;
+using Pldx::DualBoardControl::ChassisMotionState;
 
 static constexpr float GIMBAL_MAX_SPEED =
     static_cast<float>(LibXR::TWO_PI) * 2.0f;
@@ -140,11 +142,6 @@ enum class GimbalEvent : uint8_t {
   SET_VISION_AUTO_AIM,
   SET_VISION_SMALL_BUFF,
   SET_VISION_BIG_BUFF
-};
-struct GimbalModeRequest {
-  GimbalEvent mode;
-  uint32_t sequence;
-  uint32_t fresh_epoch;
 };
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_RELAX) == 0U);
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_COMMON) == 1U);
@@ -242,35 +239,17 @@ class Gimbal : public LibXR::Application {
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
           UNUSED(event_id);
-          gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);
-          gimbal->SetVisionTask(GimbalEvent::SET_VISION_IDLE);
-        },
-        this);
-
-    auto start_ctrl_callback = LibXR::Callback<uint32_t>::Create(
-        [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
-          UNUSED(in_isr);
-          UNUSED(event_id);
-          gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);
-          gimbal->SetVisionTask(GimbalEvent::SET_VISION_IDLE);
+          gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
         },
         this);
 
     auto callback = LibXR::Callback<uint32_t>::Create(
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           UNUSED(in_isr);
-          gimbal->RequestMode(static_cast<GimbalEvent>(event_id));
+          gimbal->SetMode(static_cast<GimbalEvent>(event_id));
         },
         this);
-    auto vision_callback = LibXR::Callback<uint32_t>::Create(
-        [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
-          UNUSED(in_isr);
-          gimbal->SetVisionTask(static_cast<GimbalEvent>(event_id));
-        },
-        this);
-
     cmd_.GetEvent().Register(CMD::CMD_EVENT_LOST_CTRL, lost_ctrl_callback);
-    cmd_.GetEvent().Register(CMD::CMD_EVENT_START_CTRL, start_ctrl_callback);
     gimbal_event_.Register(static_cast<uint32_t>(GimbalEvent::SET_MODE_RELAX),
                            callback);
     gimbal_event_.Register(static_cast<uint32_t>(GimbalEvent::SET_MODE_COMMON),
@@ -279,11 +258,14 @@ class Gimbal : public LibXR::Application {
         static_cast<uint32_t>(GimbalEvent::SET_MODE_AUTOPATROL), callback);
     gimbal_event_.Register(
         static_cast<uint32_t>(GimbalEvent::SET_MODE_LOW_SENSITIVITY), callback);
-    for (uint32_t event = static_cast<uint32_t>(GimbalEvent::SET_VISION_IDLE);
-         event <= static_cast<uint32_t>(GimbalEvent::SET_VISION_BIG_BUFF);
-         ++event) {
-      gimbal_event_.Register(event, vision_callback);
-    }
+    gimbal_event_.Register(static_cast<uint32_t>(GimbalEvent::SET_VISION_IDLE),
+                           callback);
+    gimbal_event_.Register(
+        static_cast<uint32_t>(GimbalEvent::SET_VISION_AUTO_AIM), callback);
+    gimbal_event_.Register(
+        static_cast<uint32_t>(GimbalEvent::SET_VISION_SMALL_BUFF), callback);
+    gimbal_event_.Register(
+        static_cast<uint32_t>(GimbalEvent::SET_VISION_BIG_BUFF), callback);
   };
 
   /**
@@ -306,9 +288,9 @@ class Gimbal : public LibXR::Application {
     chassis_motion_state_suber.StartWaiting();
 
     gimbal->last_online_time_ = LibXR::Timebase::GetMicroseconds();
+    auto last_time = LibXR::Timebase::GetMilliseconds();
 
     while (true) {
-      gimbal->ConsumeModeRequests();
       if (cmd_suber.Available()) {
         gimbal->cmd_data_ = cmd_suber.GetData();
         cmd_suber.StartWaiting();
@@ -317,31 +299,20 @@ class Gimbal : public LibXR::Application {
         const LibXR::MicrosecondTimestamp EULER_SAMPLE_TIMESTAMP =
             euler_suber.GetTimestamp();
         auto euler_sample = euler_suber.GetData();
-        if (GimbalInputGuard::AllFinite({euler_sample.Roll(),
-                                         euler_sample.Pitch(),
-                                         euler_sample.Yaw()})) {
-          euler_sample.Pitch() *= -1.0f;
-          gimbal->euler_ = euler_sample;
-          gimbal->last_euler_rx_time_ = EULER_SAMPLE_TIMESTAMP;
-          gimbal->euler_received_ = true;
-        } else {
-          gimbal->euler_received_ = false;
-        }
+        euler_sample.Pitch() *= -1.0f;
+        gimbal->euler_ = euler_sample;
+        gimbal->last_euler_rx_time_ = EULER_SAMPLE_TIMESTAMP;
+        gimbal->euler_received_ = true;
         euler_suber.StartWaiting();
       }
       if (gyro_suber.Available()) {
         const LibXR::MicrosecondTimestamp GYRO_SAMPLE_TIMESTAMP =
             gyro_suber.GetTimestamp();
         auto gyro_sample = gyro_suber.GetData();
-        if (GimbalInputGuard::AllFinite(
-                {gyro_sample.x(), gyro_sample.y(), gyro_sample.z()})) {
-          gyro_sample.y() *= -1.0f;
-          gimbal->gyro_data_ = gyro_sample;
-          gimbal->last_gyro_rx_time_ = GYRO_SAMPLE_TIMESTAMP;
-          gimbal->gyro_received_ = true;
-        } else {
-          gimbal->gyro_received_ = false;
-        }
+        gyro_sample.y() *= -1.0f;
+        gimbal->gyro_data_ = gyro_sample;
+        gimbal->last_gyro_rx_time_ = GYRO_SAMPLE_TIMESTAMP;
+        gimbal->gyro_received_ = true;
         gyro_suber.StartWaiting();
       }
       if (chassis_motion_state_suber.Available()) {
@@ -350,37 +321,9 @@ class Gimbal : public LibXR::Application {
       }
 
       gimbal->Update();
-      const LibXR::MicrosecondTimestamp NOW =
-          LibXR::Timebase::GetMicroseconds();
-      const bool IMU_VALID =
-          gimbal->euler_received_ && gimbal->gyro_received_ &&
-          (NOW - gimbal->last_euler_rx_time_).ToMicrosecond() <=
-              IMU_TIMEOUT_US &&
-          (NOW - gimbal->last_gyro_rx_time_).ToMicrosecond() <=
-              IMU_TIMEOUT_US &&
-          GimbalInputGuard::AllFinite(
-              {gimbal->euler_.Roll(), gimbal->euler_.Pitch(),
-               gimbal->euler_.Yaw(), gimbal->gyro_data_.x(),
-               gimbal->gyro_data_.y(), gimbal->gyro_data_.z()});
-      gimbal->imu_input_valid_ = IMU_VALID;
-      const bool INPUTS_VALID = gimbal->motor_feedback_online_ && IMU_VALID;
-      GimbalInputGuard::UpdateFaultLatch(INPUTS_VALID,
-                                         gimbal->input_fault_latched_);
-      gimbal->UpdateFreshEpoch(INPUTS_VALID);
-      gimbal->ApplyConsumedModeRequest(INPUTS_VALID);
-      if (!GimbalInputGuard::ControlAllowed(INPUTS_VALID,
-                                            gimbal->input_fault_latched_)) {
-        if (!INPUTS_VALID) {
-          gimbal->RequestMode(GimbalEvent::SET_MODE_RELAX);
-          gimbal->ApplyMode(GimbalEvent::SET_MODE_RELAX);
-        }
-        gimbal->Control();
-        LibXR::Thread::Sleep(2);
-        continue;
-      }
       gimbal->ParseCMD();
       gimbal->Control();
-      LibXR::Thread::Sleep(2);
+      LibXR::Thread::SleepUntil(last_time, 1);
     }
   };
 
@@ -403,9 +346,13 @@ class Gimbal : public LibXR::Application {
 
     topic_yaw_angle_.Publish(abs_angle_yaw_);
     topic_pit_angle_.Publish(abs_angle_pit_);
+    if (gyro_received_ &&
+        (NOW - last_gyro_rx_time_).ToMicrosecond() <= IMU_TIMEOUT_US) {
+      topic_yaw_omega_.Publish(gyro_data_.z());
+      topic_pit_omega_.Publish(gyro_data_.y());
+    }
     uint8_t mode = static_cast<uint8_t>(current_mode_);
     topic_mode_.Publish(mode);
-    topic_vision_task_.Publish(vision_task_);
   }
 
   /**
@@ -418,8 +365,12 @@ class Gimbal : public LibXR::Application {
     const bool LOW_SENSITIVITY =
         current_mode_ == GimbalEvent::SET_MODE_LOW_SENSITIVITY;
     const bool AUTOPATROL = current_mode_ == GimbalEvent::SET_MODE_AUTOPATROL;
-    const bool AI_YAW_ACTIVE =
-        CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && AI_GIMBAL_ACTIVE;
+    const bool VISION_MODE =
+        current_mode_ == GimbalEvent::SET_VISION_AUTO_AIM ||
+        current_mode_ == GimbalEvent::SET_VISION_SMALL_BUFF ||
+        current_mode_ == GimbalEvent::SET_VISION_BIG_BUFF;
+    const bool AI_YAW_ACTIVE = CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL &&
+                               AI_GIMBAL_ACTIVE && VISION_MODE;
     ai_yaw_active_ = AI_YAW_ACTIVE;
 
     if (AI_YAW_ACTIVE) {
@@ -432,9 +383,11 @@ class Gimbal : public LibXR::Application {
               (LibXR::Timebase::GetMilliseconds() - patrol_start_time_)
                   .ToMillisecond()) /
           1000.0f;
-      target_pit_cmd_ = PatrolTrajectory::PitchTarget(
-          patrol_pitch_center_rad_, patrol_pitch_amplitude_rad_,
-          patrol_pitch_angular_rate_rad_s_, ELAPSED_S);
+      constexpr float TWO_OVER_PI = 0.6366197723675814f;
+      target_pit_cmd_ =
+          patrol_pitch_center_rad_ +
+          patrol_pitch_amplitude_rad_ * TWO_OVER_PI *
+              std::asin(std::sin(patrol_pitch_angular_rate_rad_s_ * ELAPSED_S));
       target_pit_dot_ = 0.0f;
       target_pit_ddot_ = 0.0f;
     } else {
@@ -461,7 +414,7 @@ class Gimbal : public LibXR::Application {
       target_yaw_cmd_ += patrol_yaw_rate_rad_s_ * dt_;
       target_yaw_dot_ = patrol_yaw_rate_rad_s_;
     } else {
-      const float YAW_OPERATOR_RATE = -cmd_data_.yaw * GIMBAL_MAX_SPEED;
+      const float YAW_OPERATOR_RATE = cmd_data_.yaw * GIMBAL_MAX_SPEED;
       target_yaw_cmd_ += YAW_OPERATOR_RATE * dt_;
       target_yaw_dot_ = YAW_OPERATOR_RATE;
     }
@@ -472,18 +425,6 @@ class Gimbal : public LibXR::Application {
    * @brief 云台控制计算与输出
    */
   void Control() {
-    const bool INPUTS_VALID = motor_feedback_online_ && imu_input_valid_;
-    GimbalInputGuard::UpdateFaultLatch(INPUTS_VALID, input_fault_latched_);
-    if (!GimbalInputGuard::ControlAllowed(INPUTS_VALID, input_fault_latched_)) {
-      // 反馈无效时立即切松弛，避免继续使用旧反馈闭环输出。
-      if (!INPUTS_VALID) {
-        RequestMode(GimbalEvent::SET_MODE_RELAX);
-        ApplyMode(GimbalEvent::SET_MODE_RELAX);
-      }
-      SubmitRelaxOutput();
-      return;
-    }
-
     float pit_output = 0.0f;
     float yaw_output = 0.0f;
 
@@ -532,8 +473,6 @@ class Gimbal : public LibXR::Application {
   Motor::Feedback motor_yaw_feedback_;
   Motor::Feedback motor_pit_feedback_;
   bool motor_feedback_online_ = true;
-  bool imu_input_valid_ = false;
-  std::atomic_bool input_fault_latched_{true};
 
   CMD::GimbalCMD cmd_data_;
   Eigen::Matrix<float, 3, 1> gyro_data_;
@@ -550,10 +489,13 @@ class Gimbal : public LibXR::Application {
       LibXR::Topic::CreateTopic<float>("yawmotor_angle");
   LibXR::Topic topic_pit_angle_ =
       LibXR::Topic::CreateTopic<float>("pitchmotor_angle");
+  LibXR::Topic topic_yaw_omega_ =
+      LibXR::Topic::CreateTopic<float>("yawmotor_omega");
+  LibXR::Topic topic_pit_omega_ =
+      LibXR::Topic::CreateTopic<float>("pitchmotor_omega");
   LibXR::Topic topic_mode_ = LibXR::Topic::CreateTopic<uint8_t>("gimbal_mode");
   LibXR::Topic topic_vision_task_ =
       LibXR::Topic::CreateTopic<uint8_t>("vision_task");
-  uint8_t vision_task_ = 0U;
 
   float pit_max_angle_ = 0.0f;
   float pit_min_angle_ = 0.0f;
@@ -599,14 +541,6 @@ class Gimbal : public LibXR::Application {
   bool last_submitted_yaw_torque_valid_ = false;
   ChassisMotionState chassis_motion_state_{};
   LibXR::Topic::TopicHandle chassis_motion_state_topic_;
-  LibXR::MPMCQueue<GimbalModeRequest> mode_requests_{4};
-  std::atomic<uint32_t> request_sequence_{0U};
-  std::atomic<uint32_t> relax_sequence_{0U};
-  std::atomic<uint32_t> fresh_epoch_{0U};
-  GimbalInputGuard::ModeProtocol mode_protocol_;
-  GimbalModeRequest pending_mode_request_{GimbalEvent::SET_MODE_RELAX, 0U, 0U};
-  bool pending_mode_request_valid_ = false;
-  bool pending_relax_request_ = false;
   LibXR::Thread thread_;
 
   /*----------工具函数--------------------------------*/
@@ -652,119 +586,6 @@ class Gimbal : public LibXR::Application {
     last_yaw_angle_loop_omega_ = 0.0f;
     motor_yaw_->Relax();
     motor_pit_->Relax();
-  }
-
-  void RequestMode(GimbalEvent gimbal_event) {
-    const uint32_t FRESH_EPOCH = fresh_epoch_.load(std::memory_order_acquire);
-    const uint32_t REQUEST_SEQUENCE = NextRequestSequence();
-    if (gimbal_event == GimbalEvent::SET_MODE_RELAX) {
-      PublishRelaxSequence(REQUEST_SEQUENCE);
-      return;
-    }
-
-    GimbalModeRequest request{gimbal_event, REQUEST_SEQUENCE, FRESH_EPOCH};
-    const auto PUSH_RESULT = mode_requests_.Push(request);
-    if (PUSH_RESULT == LibXR::ErrorCode::FULL) {
-      GimbalModeRequest discarded_request;
-      (void)mode_requests_.Pop(discarded_request);
-      (void)mode_requests_.Push(request);
-    }
-  }
-
-  void ConsumeModeRequests() {
-    ConsumeRelaxSequence();
-
-    GimbalModeRequest latest_request = pending_mode_request_;
-    bool mode_request_available =
-        pending_mode_request_valid_ &&
-        mode_protocol_.OrdinaryIsCurrent(latest_request.sequence);
-    pending_mode_request_valid_ = false;
-
-    GimbalModeRequest request;
-    while (mode_requests_.Pop(request) == LibXR::ErrorCode::OK) {
-      if (!mode_protocol_.ConsumeOrdinary(request.sequence)) {
-        continue;
-      }
-      latest_request = request;
-      mode_request_available = true;
-    }
-
-    ConsumeRelaxSequence();
-    if (mode_request_available &&
-        !mode_protocol_.OrdinaryIsCurrent(latest_request.sequence)) {
-      mode_request_available = false;
-    }
-
-    pending_mode_request_ = latest_request;
-    pending_mode_request_valid_ = mode_request_available;
-  }
-
-  void ApplyConsumedModeRequest(bool inputs_valid) {
-    ConsumeRelaxSequence();
-    if (pending_mode_request_valid_ &&
-        !mode_protocol_.OrdinaryIsCurrent(pending_mode_request_.sequence)) {
-      pending_mode_request_valid_ = false;
-    }
-    if (pending_relax_request_) {
-      pending_relax_request_ = false;
-      ApplyMode(GimbalEvent::SET_MODE_RELAX);
-      return;
-    }
-    if (!pending_mode_request_valid_) {
-      return;
-    }
-
-    pending_mode_request_valid_ = false;
-    if (!mode_protocol_.CanApplyOrdinary(pending_mode_request_.sequence,
-                                         pending_mode_request_.fresh_epoch,
-                                         inputs_valid)) {
-      return;
-    }
-    if (!GimbalInputGuard::AcceptActiveRequest(inputs_valid,
-                                               input_fault_latched_)) {
-      return;
-    }
-    ApplyMode(pending_mode_request_.mode);
-    mode_protocol_.RecordOrdinaryApplied(pending_mode_request_.sequence);
-  }
-
-  uint32_t NextRequestSequence() {
-    uint32_t current = request_sequence_.load(std::memory_order_relaxed);
-    while (true) {
-      uint32_t next = current + 1U;
-      if (next == 0U) {
-        next = 1U;
-      }
-      if (request_sequence_.compare_exchange_weak(current, next,
-                                                  std::memory_order_relaxed,
-                                                  std::memory_order_relaxed)) {
-        return next;
-      }
-    }
-  }
-
-  void PublishRelaxSequence(uint32_t sequence) {
-    uint32_t current = relax_sequence_.load(std::memory_order_relaxed);
-    while ((current == 0U ||
-            GimbalInputGuard::IsSequenceAfter(sequence, current)) &&
-           !relax_sequence_.compare_exchange_weak(current, sequence,
-                                                  std::memory_order_release,
-                                                  std::memory_order_relaxed)) {
-    }
-  }
-
-  void ConsumeRelaxSequence() {
-    const uint32_t SEQUENCE =
-        relax_sequence_.exchange(0U, std::memory_order_acq_rel);
-    if (SEQUENCE == 0U || !mode_protocol_.ConsumeRelax(SEQUENCE)) {
-      return;
-    }
-    pending_relax_request_ = true;
-  }
-
-  void UpdateFreshEpoch(bool inputs_valid) {
-    fresh_epoch_.store(mode_protocol_.ObserveInputs(inputs_valid),
-                       std::memory_order_release);
   }
 
   void ControlYawMotor(const Motor::MotorCmd& command) {
@@ -823,11 +644,11 @@ class Gimbal : public LibXR::Application {
     } else if (yaw_manual_controller_ == YawManualController::SMC) {
       SolveManualYawSmc(yaw_output);
     } else {
-      SolveLegacyYaw(yaw_output);
+      SolvePidYaw(yaw_output);
     }
   }
 
-  void SolveLegacyYaw(float& yaw_output) {
+  void SolvePidYaw(float& yaw_output) {
     const float YAW_ERROR = target_yaw_cmd_ - euler_.Yaw();
     const float YAW_ANGLE_LOOP_OMEGA =
         pid_yaw_angle_.Calculate(YAW_ERROR, 0.0f, dt_);
@@ -923,12 +744,14 @@ class Gimbal : public LibXR::Application {
     yaw_output = YAW_SMC_OUTPUT.tau_cmd_nm;
   }
 
+  void PublishVisionTask(uint8_t task) { topic_vision_task_.Publish(task); }
+
   /**
    * @brief 设置云台模式
    *
    * @param gimbal_event 云台事件类型
    */
-  void ApplyMode(GimbalEvent gimbal_event) {
+  void SetMode(GimbalEvent gimbal_event) {
     if (gimbal_event == current_mode_) {
       return;
     }
@@ -941,56 +764,187 @@ class Gimbal : public LibXR::Application {
       current_mode_ = gimbal_event;
       return;
     }
-    current_mode_ = gimbal_event;
 
-    pid_pit_omega_.SetFeedForward(0.0f);
-    pid_yaw_omega_.SetFeedForward(0.0f);
-    last_pit_angle_loop_omega_ = 0.0f;
-    last_yaw_angle_loop_omega_ = 0.0f;
-    yaw_smc_reset_pending_ = true;
-    yaw_lqr_eso_reset_pending_ = true;
-    previous_yaw_used_smc_ = false;
-    previous_ai_used_lqr_ = false;
-
-    const bool RELAX = gimbal_event == GimbalEvent::SET_MODE_RELAX;
-    const bool TRACKING_MODE =
-        gimbal_event == GimbalEvent::SET_MODE_COMMON ||
-        gimbal_event == GimbalEvent::SET_MODE_AUTOPATROL ||
-        gimbal_event == GimbalEvent::SET_MODE_LOW_SENSITIVITY;
-    if (!RELAX && !TRACKING_MODE) {
-      return;
+    switch (gimbal_event) {
+      case GimbalEvent::SET_VISION_IDLE:
+        PublishVisionTask(0U);
+        current_mode_ = gimbal_event;
+        pid_pit_omega_.SetFeedForward(0.0f);
+        pid_yaw_omega_.SetFeedForward(0.0f);
+        last_pit_angle_loop_omega_ = 0.0f;
+        last_yaw_angle_loop_omega_ = 0.0f;
+        yaw_smc_reset_pending_ = true;
+        yaw_lqr_eso_reset_pending_ = true;
+        previous_yaw_used_smc_ = false;
+        previous_ai_used_lqr_ = false;
+        target_pit_cmd_ = euler_.Pitch();
+        target_yaw_cmd_ = euler_.Yaw();
+        pid_pit_angle_.Reset();
+        pid_pit_omega_.Reset();
+        pid_yaw_angle_.Reset();
+        pid_yaw_omega_.Reset();
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        break;
+      case GimbalEvent::SET_VISION_AUTO_AIM:
+        PublishVisionTask(1U);
+        current_mode_ = gimbal_event;
+        pid_pit_omega_.SetFeedForward(0.0f);
+        pid_yaw_omega_.SetFeedForward(0.0f);
+        last_pit_angle_loop_omega_ = 0.0f;
+        last_yaw_angle_loop_omega_ = 0.0f;
+        yaw_smc_reset_pending_ = true;
+        yaw_lqr_eso_reset_pending_ = true;
+        previous_yaw_used_smc_ = false;
+        previous_ai_used_lqr_ = false;
+        target_pit_cmd_ = euler_.Pitch();
+        target_yaw_cmd_ = euler_.Yaw();
+        pid_pit_angle_.Reset();
+        pid_pit_omega_.Reset();
+        pid_yaw_angle_.Reset();
+        pid_yaw_omega_.Reset();
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        break;
+      case GimbalEvent::SET_VISION_SMALL_BUFF:
+        PublishVisionTask(2U);
+        current_mode_ = gimbal_event;
+        pid_pit_omega_.SetFeedForward(0.0f);
+        pid_yaw_omega_.SetFeedForward(0.0f);
+        last_pit_angle_loop_omega_ = 0.0f;
+        last_yaw_angle_loop_omega_ = 0.0f;
+        yaw_smc_reset_pending_ = true;
+        yaw_lqr_eso_reset_pending_ = true;
+        previous_yaw_used_smc_ = false;
+        previous_ai_used_lqr_ = false;
+        target_pit_cmd_ = euler_.Pitch();
+        target_yaw_cmd_ = euler_.Yaw();
+        pid_pit_angle_.Reset();
+        pid_pit_omega_.Reset();
+        pid_yaw_angle_.Reset();
+        pid_yaw_omega_.Reset();
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        break;
+      case GimbalEvent::SET_VISION_BIG_BUFF:
+        PublishVisionTask(3U);
+        current_mode_ = gimbal_event;
+        pid_pit_omega_.SetFeedForward(0.0f);
+        pid_yaw_omega_.SetFeedForward(0.0f);
+        last_pit_angle_loop_omega_ = 0.0f;
+        last_yaw_angle_loop_omega_ = 0.0f;
+        yaw_smc_reset_pending_ = true;
+        yaw_lqr_eso_reset_pending_ = true;
+        previous_yaw_used_smc_ = false;
+        previous_ai_used_lqr_ = false;
+        target_pit_cmd_ = euler_.Pitch();
+        target_yaw_cmd_ = euler_.Yaw();
+        pid_pit_angle_.Reset();
+        pid_pit_omega_.Reset();
+        pid_yaw_angle_.Reset();
+        pid_yaw_omega_.Reset();
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        break;
+      case GimbalEvent::SET_MODE_RELAX:
+        current_mode_ = gimbal_event;
+        pid_pit_omega_.SetFeedForward(0.0f);
+        pid_yaw_omega_.SetFeedForward(0.0f);
+        last_pit_angle_loop_omega_ = 0.0f;
+        last_yaw_angle_loop_omega_ = 0.0f;
+        yaw_smc_reset_pending_ = true;
+        yaw_lqr_eso_reset_pending_ = true;
+        previous_yaw_used_smc_ = false;
+        previous_ai_used_lqr_ = false;
+        motor_yaw_->Disable();
+        motor_pit_->Disable();
+        PublishVisionTask(0U);
+        pid_pit_angle_.Reset();
+        pid_pit_omega_.Reset();
+        pid_yaw_angle_.Reset();
+        pid_yaw_omega_.Reset();
+        target_pit_cmd_ = 0.0f;
+        target_yaw_cmd_ = 0.0f;
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        break;
+      case GimbalEvent::SET_MODE_COMMON:
+        current_mode_ = gimbal_event;
+        pid_pit_omega_.SetFeedForward(0.0f);
+        pid_yaw_omega_.SetFeedForward(0.0f);
+        last_pit_angle_loop_omega_ = 0.0f;
+        last_yaw_angle_loop_omega_ = 0.0f;
+        yaw_smc_reset_pending_ = true;
+        yaw_lqr_eso_reset_pending_ = true;
+        previous_yaw_used_smc_ = false;
+        previous_ai_used_lqr_ = false;
+        target_pit_cmd_ = euler_.Pitch();
+        target_yaw_cmd_ = euler_.Yaw();
+        pid_pit_angle_.Reset();
+        pid_pit_omega_.Reset();
+        pid_yaw_angle_.Reset();
+        pid_yaw_omega_.Reset();
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        break;
+      case GimbalEvent::SET_MODE_AUTOPATROL:
+        current_mode_ = gimbal_event;
+        pid_pit_omega_.SetFeedForward(0.0f);
+        pid_yaw_omega_.SetFeedForward(0.0f);
+        last_pit_angle_loop_omega_ = 0.0f;
+        last_yaw_angle_loop_omega_ = 0.0f;
+        yaw_smc_reset_pending_ = true;
+        yaw_lqr_eso_reset_pending_ = true;
+        previous_yaw_used_smc_ = false;
+        previous_ai_used_lqr_ = false;
+        target_pit_cmd_ = euler_.Pitch();
+        target_yaw_cmd_ = euler_.Yaw();
+        pid_pit_angle_.Reset();
+        pid_pit_omega_.Reset();
+        pid_yaw_angle_.Reset();
+        pid_yaw_omega_.Reset();
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        patrol_start_time_ = LibXR::Timebase::GetMilliseconds();
+        patrol_pitch_center_rad_ = target_pit_cmd_;
+        break;
+      case GimbalEvent::SET_MODE_LOW_SENSITIVITY:
+        current_mode_ = gimbal_event;
+        pid_pit_omega_.SetFeedForward(0.0f);
+        pid_yaw_omega_.SetFeedForward(0.0f);
+        last_pit_angle_loop_omega_ = 0.0f;
+        last_yaw_angle_loop_omega_ = 0.0f;
+        yaw_smc_reset_pending_ = true;
+        yaw_lqr_eso_reset_pending_ = true;
+        previous_yaw_used_smc_ = false;
+        previous_ai_used_lqr_ = false;
+        target_pit_cmd_ = euler_.Pitch();
+        target_yaw_cmd_ = euler_.Yaw();
+        pid_pit_angle_.Reset();
+        pid_pit_omega_.Reset();
+        pid_yaw_angle_.Reset();
+        pid_yaw_omega_.Reset();
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        break;
+      default:
+        break;
     }
-
-    pid_pit_angle_.Reset();
-    pid_pit_omega_.Reset();
-    pid_yaw_angle_.Reset();
-    pid_yaw_omega_.Reset();
-    target_yaw_dot_ = 0.0f;
-    target_yaw_ddot_ = 0.0f;
-    target_pit_dot_ = 0.0f;
-    target_pit_ddot_ = 0.0f;
-
-    if (RELAX) {
-      motor_yaw_->Disable();
-      motor_pit_->Disable();
-      target_pit_cmd_ = 0.0f;
-      target_yaw_cmd_ = 0.0f;
-      return;
-    }
-
-    target_pit_cmd_ = euler_.Pitch();
-    target_yaw_cmd_ = euler_.Yaw();
-    if (gimbal_event == GimbalEvent::SET_MODE_AUTOPATROL) {
-      patrol_pitch_center_rad_ = target_pit_cmd_;
-      patrol_start_time_ = LibXR::Timebase::GetMilliseconds();
-    }
-  }
-
-  void SetVisionTask(GimbalEvent event) {
-    const auto value = static_cast<uint8_t>(event);
-    const auto first = static_cast<uint8_t>(GimbalEvent::SET_VISION_IDLE);
-    const auto last = static_cast<uint8_t>(GimbalEvent::SET_VISION_BIG_BUFF);
-    if (value < first || value > last) return;
-    vision_task_ = static_cast<uint8_t>(value - first);
   }
 };

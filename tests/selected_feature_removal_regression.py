@@ -18,7 +18,7 @@ forbidden = {
     "minimum control period": "CONTROL_DT_MIN",
     "maximum control period": "CONTROL_DT_MAX",
     "generic Yaw finite-output fallback": "if (!std::isfinite(yaw_output))",
-    "legacy-Yaw transition reset": "ResetLegacyYawToCurrent",
+    "PID-Yaw transition reset": "ResetPidYawToCurrent",
     "mode-transition controller invalidation": "InvalidateYawControllerState",
     "control-mode snapshot member": "ctrl_mode_snapshot_",
     "AI-status snapshot member": "ai_gimbal_status_snapshot_",

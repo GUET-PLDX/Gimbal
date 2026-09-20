@@ -3,7 +3,7 @@
 ## Goal
 
 Use the original Gimbal `j_yaw` constructor parameter as the single Yaw
-inertia source for both the legacy PID path and the AI Yaw LQR/ESO path.
+inertia source for both the PID Yaw path and the AI Yaw LQR/ESO path.
 Remove the duplicate externally configured `yaw_lqr_eso.j_kg_m2` value without
 changing control routing or numerical behavior.
 
@@ -23,9 +23,9 @@ changing control routing or numerical behavior.
 
 - Unifying `yaw_k` with `b_nms_rad`.
 - Unifying PID gains with LQR gains.
-- Unifying legacy PID output limits with AI Yaw torque limits.
+- Unifying PID Yaw output limits with AI Yaw torque limits.
 - Changing AI Yaw activation, fallback, reset, or torque submission behavior.
-- Changing the legacy Pitch or Yaw control formulas.
+- Changing the PID Pitch or Yaw control formulas.
 
 ## Interface Design
 
@@ -47,7 +47,7 @@ rejects an invalid `Config::j_kg_m2`.
 ## Data Flow
 
 The robot YAML supplies `j_yaw` once. XRobot passes it to the Gimbal
-constructor, which stores it in `j_yaw_`. The legacy path continues to use
+constructor, which stores it in `j_yaw_`. The PID Yaw path continues to use
 `j_yaw_ * YAW_ALPHA`. The AI path passes the same `j_yaw_` to `Calculate()`,
 which uses it for `tau_ff_alpha_nm`, `B0`, and the ESO viscous model term.
 

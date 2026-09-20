@@ -15,7 +15,7 @@
 #include "yaw_lqr_eso_test_support.hpp"
 
 enum class ControllerKind {
-  LEGACY,
+  PID,
   LQR_1_1,
   LQR_3_8_1_1,
   LQR_12_3_4,
@@ -133,7 +133,7 @@ constexpr std::array<Scenario, 10> SCENARIOS{{
 }};
 
 constexpr std::array<ControllerKind, 4> CONTROLLERS{{
-    ControllerKind::LEGACY,
+    ControllerKind::PID,
     ControllerKind::LQR_1_1,
     ControllerKind::LQR_3_8_1_1,
     ControllerKind::LQR_12_3_4,
@@ -155,7 +155,7 @@ class ControllerAdapter final {
   explicit ControllerAdapter(ControllerKind kind)
       : kind_(kind), config_(base_yaw_config()) {
     switch (kind_) {
-      case ControllerKind::LEGACY:
+      case ControllerKind::PID:
       case ControllerKind::LQR_1_1:
         break;
       case ControllerKind::LQR_3_8_1_1:
@@ -170,21 +170,21 @@ class ControllerAdapter final {
   }
 
   void Reset(PlantState state) {
-    legacy_.Reset();
+    pid_.Reset();
     controller_.Reset(static_cast<float>(wrap_pi(state.theta)),
                       static_cast<float>(state.omega), 0.0f);
   }
 
   ControllerSample Calculate(ReferenceSample reference, PlantState feedback,
                              double dt) {
-    if (kind_ == ControllerKind::LEGACY) {
+    if (kind_ == ControllerKind::PID) {
       const double TORQUE =
-          legacy_.Calculate(reference, feedback.theta, feedback.omega, dt);
-      constexpr double LEGACY_TORQUE_LIMIT = 2.223;
+          pid_.Calculate(reference, feedback.theta, feedback.omega, dt);
+      constexpr double PID_TORQUE_LIMIT = 2.223;
       return {
           .torque = TORQUE,
           .valid = std::isfinite(TORQUE),
-          .hard_limit_active = std::fabs(TORQUE) >= LEGACY_TORQUE_LIMIT,
+          .hard_limit_active = std::fabs(TORQUE) >= PID_TORQUE_LIMIT,
       };
     }
 
@@ -211,19 +211,19 @@ class ControllerAdapter final {
   }
 
   void CommitAppliedTorque(double torque) {
-    if (kind_ != ControllerKind::LEGACY) {
+    if (kind_ != ControllerKind::PID) {
       controller_.CommitAppliedTorque(static_cast<float>(torque));
     }
   }
 
   const YawLqrEso::Config& Config() const { return config_; }
 
-  bool IsLegacy() const { return kind_ == ControllerKind::LEGACY; }
+  bool IsPid() const { return kind_ == ControllerKind::PID; }
 
  private:
   ControllerKind kind_;
   YawLqrEso::Config config_;
-  LegacyYawAdapter legacy_;
+  PidYawAdapter pid_;
   YawLqrEso controller_;
 };
 
@@ -474,7 +474,7 @@ static SimulationResult run_simulation_case(const Scenario& scenario,
                             std::fabs(OUTPUT.torque) <=
                                 static_cast<double>(TEST_YAW_TORQUE_LIMIT_NM) +
                                     HARD_CONSTRAINT_TOLERANCE;
-    if (!adapter.IsLegacy()) {
+    if (!adapter.IsPid()) {
       if (CONFIG.torque_slew_enable) {
         const double MAXIMUM_DELTA =
             static_cast<double>(CONFIG.torque_slew_rate_nm_s) * DT +
@@ -516,7 +516,7 @@ static SimulationResult run_simulation_case(const Scenario& scenario,
              .soft_limit_active = OUTPUT.soft_limit_active,
              .hard_limit_active = OUTPUT.hard_limit_active});
       }
-      if (!adapter.IsLegacy() && OUTPUT.observer_ready) {
+      if (!adapter.IsPid() && OUTPUT.observer_ready) {
         const double ESTIMATED_DISTURBANCE_TORQUE =
             static_cast<double>(TEST_YAW_J_KG_M2) * OUTPUT.z3;
         eso_error_samples.push_back(
@@ -694,8 +694,8 @@ static std::vector<SimulationResult> run_mismatch_matrix() {
 
 static std::string_view controller_name(ControllerKind kind) {
   switch (kind) {
-    case ControllerKind::LEGACY:
-      return "legacy";
+    case ControllerKind::PID:
+      return "pid";
     case ControllerKind::LQR_1_1:
       return "[1,1]";
     case ControllerKind::LQR_3_8_1_1:
@@ -753,8 +753,8 @@ static void test_non_performance_gates(
         std::fabs(RESULT.measurement_duration -
                   RESULT.expected_measurement_duration) <= DURATION_TOLERANCE,
         RESULT, "exact_measurement_duration");
-    if (RESULT.controller == ControllerKind::LEGACY) {
-      CHECK_GATE(!RESULT.eso_metric_valid, RESULT, "legacy_eso_metric_invalid");
+    if (RESULT.controller == ControllerKind::PID) {
+      CHECK_GATE(!RESULT.eso_metric_valid, RESULT, "pid_eso_metric_invalid");
     }
 
     if (RESULT.controller != ControllerKind::LQR_1_1) {

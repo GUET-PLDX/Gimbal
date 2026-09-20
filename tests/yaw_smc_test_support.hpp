@@ -58,8 +58,7 @@ inline float sig_pow(float value, float exponent) {
   return std::copysign(std::pow(std::fabs(value), exponent), value);
 }
 
-// Independent oracle copied from SMC_Tick. It deliberately does not call
-// YawSmc helpers so the host test can catch a shared implementation mistake.
+// 独立 oracle 不调用 YawSmc 帮助函数，以避免生产实现与测试共享错误。
 struct SmcCodeOracle {
   float e_theta_rad{};
   float e_omega_rad_s{};
@@ -74,23 +73,18 @@ struct SmcCodeOracle {
 
 inline SmcCodeOracle smc_code_oracle(const YawSmc::Config& config,
                                      const YawSmc::Reference& reference,
-                                     const YawSmc::Feedback& feedback,
-                                     float target_last_rad = 0.0f,
-                                     float target_dot_rad_s = 0.0f) {
+                                     const YawSmc::Feedback& feedback) {
   SmcCodeOracle oracle{};
   oracle.e_theta_rad =
       LibXR::CycleValue<float>(feedback.theta_rad) - reference.theta_rad;
-  const float TARGET_DELTA_RAD =
-      LibXR::CycleValue<float>(reference.theta_rad) - target_last_rad;
-  oracle.e_omega_rad_s = feedback.omega_rad_s - target_dot_rad_s;
+  oracle.e_omega_rad_s = feedback.omega_rad_s - reference.omega_rad_s;
   oracle.in_deadband =
       std::fabs(oracle.e_theta_rad) < config.error_deadband_rad;
   if (oracle.in_deadband) {
     return oracle;
   }
 
-  oracle.tau_ff_alpha_nm =
-      config.j_kg_m2 * (TARGET_DELTA_RAD - target_dot_rad_s);
+  oracle.tau_ff_alpha_nm = config.j_kg_m2 * reference.alpha_rad_s2;
   const float ABS_E_THETA_RAD = std::fabs(oracle.e_theta_rad);
   oracle.used_ftsmc =
       config.ftsmc_enable && ABS_E_THETA_RAD >= config.ftsmc_switch_rad;
@@ -98,9 +92,8 @@ inline SmcCodeOracle smc_code_oracle(const YawSmc::Config& config,
   if (oracle.used_ftsmc) {
     const float R = config.q / config.p;
     oracle.s = oracle.e_omega_rad_s + config.c * sig_pow(oracle.e_theta_rad, R);
-    const float E_QP = sig_pow(oracle.e_theta_rad, R);
-    surface_dot_term =
-        config.c * R * oracle.e_omega_rad_s * E_QP / ABS_E_THETA_RAD;
+    surface_dot_term = config.c * R * std::pow(ABS_E_THETA_RAD, R - 1.0f) *
+                       oracle.e_omega_rad_s;
   } else {
     oracle.s = oracle.e_omega_rad_s + config.c * oracle.e_theta_rad;
     surface_dot_term = config.c * oracle.e_omega_rad_s;

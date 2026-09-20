@@ -157,7 +157,7 @@ static void test_wrap_and_complete_deadband() {
   cfg.error_deadband_rad = 0.04f;
   output = calculate_once(controller, cfg, 0.0f, 0.0f, 2.0f, 0.04f, 0.0f);
   CHECK(output.valid);
-  CHECK_NEAR(output.tau_cmd_nm, -0.06f, 1.0e-6f);
+  CHECK_NEAR(output.tau_cmd_nm, 0.0f, 1.0e-6f);
   cfg.error_deadband_rad = 0.0f;
   output = calculate_once(controller, cfg, 3.13f, 0.0f, 0.0f, -3.13f, 0.0f);
   CHECK(std::fabs(output.e_theta_rad) < 0.03f);
@@ -178,40 +178,106 @@ static void test_cycle_value_error_matches_pid_geometry() {
   CHECK(std::fabs(output.e_theta_rad) < 1.0e-5f);
 }
 
-static void test_wrapped_target_delta_is_short_arc() {
+static void test_reference_kinematics_are_consumed_directly() {
   auto cfg = base_yaw_smc_config();
   cfg.ftsmc_enable = false;
-  cfg.error_deadband_rad = 0.0f;
-  cfg.torque_slew_enable = false;
-
-  YawSmc controller;
-  const float NEAR_TWO_PI = static_cast<float>(LibXR::TWO_PI) - 0.01f;
-  controller.Reset(NEAR_TWO_PI, 0.0f, 0.0f);
-  auto output = calculate_once(controller, cfg, NEAR_TWO_PI, 0.0f, 0.0f,
-                               NEAR_TWO_PI, 0.0f);
-  CHECK(output.valid);
-
-  output = calculate_once(controller, cfg, 0.01f, 0.0f, 0.0f, 0.01f, 0.0f);
-  CHECK(output.valid);
-  CHECK(std::fabs(output.tau_ff_alpha_nm) < 0.002f);
-}
-
-static void test_source_target_history() {
-  auto cfg = base_yaw_smc_config();
-  cfg.ftsmc_enable = false;
-  cfg.error_deadband_rad = 0.2f;
+  cfg.epsilon = 0.0f;
+  cfg.torque_soft_limit_nm = 0.0f;
+  cfg.torque_min_nm = 0.0f;
+  cfg.torque_max_nm = 0.0f;
   cfg.torque_slew_enable = false;
 
   YawSmc controller;
   controller.Reset(0.0f, 0.0f, 0.0f);
-  auto output = calculate_once(controller, cfg, 0.1f, 0.0f, 99.0f, 0.1f, 0.0f);
-  CHECK(output.valid);
-  CHECK_NEAR(output.tau_cmd_nm, 0.0f, 1.0e-7f);
+  const auto output =
+      calculate_once(controller, cfg, 0.1f, 0.4f, 3.0f, 0.2f, 0.7f);
 
-  output = calculate_once(controller, cfg, 0.2f, 0.0f, 99.0f, 0.4f, 0.0f);
+  const float E_THETA_RAD = 0.1f;
+  const float E_OMEGA_RAD_S = 0.3f;
+  const float S = E_OMEGA_RAD_S + cfg.c * E_THETA_RAD;
+  const float EXPECTED_TAU_FF_NM = cfg.j_kg_m2 * 3.0f;
+  const float EXPECTED_TAU_SMC_NM =
+      cfg.j_kg_m2 * (-cfg.c * E_OMEGA_RAD_S - cfg.k * S);
+
   CHECK(output.valid);
-  CHECK_NEAR(output.e_omega_rad_s, -0.1f, 1.0e-6f);
-  CHECK_NEAR(output.tau_ff_alpha_nm, 0.003f, 1.0e-7f);
+  CHECK_NEAR(output.e_theta_rad, E_THETA_RAD, 1.0e-6f);
+  CHECK_NEAR(output.e_omega_rad_s, E_OMEGA_RAD_S, 1.0e-6f);
+  CHECK_NEAR(output.tau_ff_alpha_nm, EXPECTED_TAU_FF_NM, 1.0e-6f);
+  CHECK_NEAR(output.tau_smc_nm, EXPECTED_TAU_SMC_NM, 1.0e-6f);
+  CHECK_NEAR(output.tau_pre_limit_nm, EXPECTED_TAU_FF_NM + EXPECTED_TAU_SMC_NM,
+             1.0e-6f);
+}
+
+static void test_core_law_is_independent_of_valid_dt() {
+  auto cfg = base_yaw_smc_config();
+  cfg.ftsmc_enable = false;
+  cfg.torque_slew_enable = false;
+
+  YawSmc fast_controller;
+  YawSmc slow_controller;
+  fast_controller.Reset(0.0f, 0.0f, 0.0f);
+  slow_controller.Reset(0.0f, 0.0f, 0.0f);
+
+  const auto fast = calculate_once(fast_controller, cfg, 0.1f, 0.4f, 3.0f, 0.2f,
+                                   0.7f, 0.001f);
+  const auto slow = calculate_once(slow_controller, cfg, 0.1f, 0.4f, 3.0f, 0.2f,
+                                   0.7f, 0.010f);
+
+  CHECK(fast.valid && slow.valid);
+  CHECK_NEAR(fast.e_omega_rad_s, slow.e_omega_rad_s, 1.0e-7f);
+  CHECK_NEAR(fast.tau_ff_alpha_nm, slow.tau_ff_alpha_nm, 1.0e-7f);
+  CHECK_NEAR(fast.tau_pre_limit_nm, slow.tau_pre_limit_nm, 1.0e-7f);
+}
+
+static void test_ftsmc_feedback_is_odd_symmetric() {
+  auto cfg = base_yaw_smc_config();
+  cfg.torque_soft_limit_nm = 0.0f;
+  cfg.torque_min_nm = 0.0f;
+  cfg.torque_max_nm = 0.0f;
+  cfg.torque_slew_enable = false;
+
+  YawSmc positive_controller;
+  YawSmc negative_controller;
+  positive_controller.Reset(0.0f, 0.0f, 0.0f);
+  negative_controller.Reset(0.0f, 0.0f, 0.0f);
+
+  const auto positive =
+      calculate_once(positive_controller, cfg, 0.0f, 0.0f, 0.0f, 0.1f, 0.2f);
+  const auto negative =
+      calculate_once(negative_controller, cfg, 0.0f, 0.0f, 0.0f, -0.1f, -0.2f);
+
+  CHECK(positive.valid && negative.valid);
+  CHECK(positive.used_ftsmc && negative.used_ftsmc);
+  CHECK_NEAR(negative.s, -positive.s, 2.0e-5f);
+  CHECK_NEAR(negative.tau_smc_nm, -positive.tau_smc_nm, 1.0e-6f);
+}
+
+static void test_ftsmc_negative_error_uses_unsigned_power_derivative() {
+  auto cfg = base_yaw_smc_config();
+  cfg.torque_soft_limit_nm = 0.0f;
+  cfg.torque_min_nm = 0.0f;
+  cfg.torque_max_nm = 0.0f;
+  cfg.torque_slew_enable = false;
+
+  YawSmc controller;
+  controller.Reset(0.0f, 0.0f, 0.0f);
+  const auto output =
+      calculate_once(controller, cfg, 0.0f, 0.0f, 0.0f, -0.1f, 0.2f);
+
+  const float R = cfg.q / cfg.p;
+  const float E_THETA_RAD = -0.1f;
+  const float E_OMEGA_RAD_S = 0.2f;
+  const float S =
+      E_OMEGA_RAD_S +
+      cfg.c * std::copysign(std::pow(std::fabs(E_THETA_RAD), R), E_THETA_RAD);
+  const float SURFACE_DOT_TERM =
+      cfg.c * R * std::pow(std::fabs(E_THETA_RAD), R - 1.0f) * E_OMEGA_RAD_S;
+  const float EXPECTED_TAU_SMC_NM =
+      cfg.j_kg_m2 *
+      (-SURFACE_DOT_TERM - cfg.epsilon * sat(S / cfg.sat_boundary) - cfg.k * S);
+
+  CHECK(output.valid && output.used_ftsmc);
+  CHECK_NEAR(output.tau_smc_nm, EXPECTED_TAU_SMC_NM, 1.0e-5f);
 }
 
 static void test_soft_and_hard_limit_order() {
@@ -328,8 +394,10 @@ int main() {
   test_ftsmc_switch_and_direct_error();
   test_wrap_and_complete_deadband();
   test_cycle_value_error_matches_pid_geometry();
-  test_wrapped_target_delta_is_short_arc();
-  test_source_target_history();
+  test_reference_kinematics_are_consumed_directly();
+  test_core_law_is_independent_of_valid_dt();
+  test_ftsmc_feedback_is_odd_symmetric();
+  test_ftsmc_negative_error_uses_unsigned_power_derivative();
   test_soft_and_hard_limit_order();
   test_slew_uses_only_committed_torque();
   test_slew_reentry_uses_latest_applied_torque();

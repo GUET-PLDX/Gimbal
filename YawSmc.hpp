@@ -28,8 +28,7 @@ class YawSmc final {
   };
 
   struct Reference {
-    // target is consumed by the code's target history; the other fields are
-    // retained by the public interface but are not used by SMC_Tick math.
+    // 目标角度、角速度和角加速度均使用 SI 单位并直接参与控制律。
     float theta_rad{};
     float omega_rad_s{};
     float alpha_rad_s2{};
@@ -80,11 +79,10 @@ class YawSmc final {
 
   void Reset(float theta_rad, float omega_rad_s,
              float previous_applied_torque_nm) {
+    UNUSED(theta_rad);
     UNUSED(omega_rad_s);
     last_applied_torque_nm_ = previous_applied_torque_nm;
     slew_anchor_torque_nm_ = previous_applied_torque_nm;
-    target_last_rad_ = theta_rad;
-    target_dot_rad_s_ = 0.0f;
     previous_torque_slew_enable_ = false;
   }
 
@@ -101,23 +99,16 @@ class YawSmc final {
       return output;
     }
 
-    // Same CycleValue shortest-path difference as the PID yaw angle loop,
-    // with sliding-mode sign e = θ − θd.
+    // 与 Yaw PID 角度环一致，使用 CycleValue 最短路并定义 e = θ - θd。
     output.e_theta_rad =
         LibXR::CycleValue<float>(feedback.theta_rad) - reference.theta_rad;
-    const float TARGET_DELTA_RAD =
-        LibXR::CycleValue<float>(reference.theta_rad) - target_last_rad_;
-    const float TARGET_DDOT_CODE = TARGET_DELTA_RAD - target_dot_rad_s_;
-    output.e_omega_rad_s = feedback.omega_rad_s - target_dot_rad_s_;
+    output.e_omega_rad_s = feedback.omega_rad_s - reference.omega_rad_s;
 
     if (!std::isfinite(output.e_theta_rad) ||
         !std::isfinite(output.e_omega_rad_s)) {
       return {};
     }
 
-    // Match SMC_Tick: target_dot is assigned before its strict deadband return,
-    // while target_last advances only after a non-deadband control calculation.
-    target_dot_rad_s_ = TARGET_DELTA_RAD;
     if (std::fabs(output.e_theta_rad) < config.error_deadband_rad) {
       if (config.torque_slew_enable && !previous_torque_slew_enable_) {
         slew_anchor_torque_nm_ = last_applied_torque_nm_;
@@ -127,11 +118,10 @@ class YawSmc final {
       return output;
     }
 
-    output.tau_ff_alpha_nm = config.j_kg_m2 * TARGET_DDOT_CODE;
+    output.tau_ff_alpha_nm = config.j_kg_m2 * reference.alpha_rad_s2;
 
     const float ABS_E_THETA_RAD = std::fabs(output.e_theta_rad);
-    // The source uses FTSMC first and replaces it with linear SMC strictly
-    // below the configured SI boundary (the source literal is one unit).
+    // 误差达到配置边界时使用 FTSMC，小于边界时使用线性 SMC。
     const bool USE_FTSMC =
         config.ftsmc_enable && ABS_E_THETA_RAD >= config.ftsmc_switch_rad;
     output.used_ftsmc = USE_FTSMC;
@@ -141,10 +131,9 @@ class YawSmc final {
       const float R = config.q / config.p;
       output.s =
           output.e_omega_rad_s + config.c * SigPow(output.e_theta_rad, R);
-      // Preserve SMC_Tick's signed e_qp / abs(error) factor for negative e.
-      const float E_QP = SigPow(output.e_theta_rad, R);
-      surface_dot_term =
-          config.c * R * output.e_omega_rad_s * E_QP / ABS_E_THETA_RAD;
+      // d(sig^r(e))/dt = r * |e|^(r-1) * e_dot，不含 sign(e)。
+      surface_dot_term = config.c * R * std::pow(ABS_E_THETA_RAD, R - 1.0f) *
+                         output.e_omega_rad_s;
     } else {
       output.s = output.e_omega_rad_s + config.c * output.e_theta_rad;
       surface_dot_term = config.c * output.e_omega_rad_s;
@@ -241,8 +230,6 @@ class YawSmc final {
     if (config.torque_slew_enable && !previous_torque_slew_enable_) {
       slew_anchor_torque_nm_ = last_applied_torque_nm_;
     }
-    target_last_rad_ = reference.theta_rad;
-    target_dot_rad_s_ = TARGET_DELTA_RAD;
     previous_torque_slew_enable_ = config.torque_slew_enable;
     output.valid = true;
     return output;
@@ -313,7 +300,5 @@ class YawSmc final {
 
   float last_applied_torque_nm_{};
   float slew_anchor_torque_nm_{};
-  float target_last_rad_{};
-  float target_dot_rad_s_{};
   bool previous_torque_slew_enable_{};
 };
