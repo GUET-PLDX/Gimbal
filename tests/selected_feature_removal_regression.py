@@ -24,6 +24,14 @@ forbidden = {
     "AI-status snapshot member": "ai_gimbal_status_snapshot_",
     "AI-config snapshot member": "yaw_lqr_eso_config_snapshot_",
     "AI-output snapshot member": "yaw_lqr_eso_output_",
+    "runtime ESO enable edge flag": "previous_eso_enable_",
+    "runtime ESO compensation edge flag": "previous_eso_comp_enable_",
+    "runtime Coulomb edge flag": "previous_coulomb_enable_",
+    "runtime LQI edge flag": "previous_lqi_enable_",
+    "runtime torque-bias edge flag": "previous_torque_bias_enable_",
+    "runtime torque-slew edge flag": "previous_torque_slew_enable_",
+    "controller config member in Gimbal": "yaw_lqr_eso_config_",
+    "controller config member in Gimbal (SMC)": "yaw_smc_config_",
 }
 
 for description, token in forbidden.items():
@@ -33,18 +41,17 @@ for description, token in forbidden.items():
 required = {
     "fixed Euler Topic": r'euler_suber\s*\(\s*"gimbal_euler"\s*\)',
     "fixed gyro Topic": r'gyro_suber\s*\(\s*"gimbal_gyro"\s*\)',
-    "motor and IMU feedback guard": r"ControlAllowed\(INPUTS_VALID",
-    "AI Yaw solver": r"void\s+Solve\s*\(\s*float&\s+pit_output\s*,\s*float&\s+yaw_output\s*\)",
+    "AI Yaw solver": r"void\s+Solve\s*\(\s*const\s+CycleFeedforward&\s+feedforward\s*,\s*float&\s+pit_output",
     "AI output validity guard": r"if\s*\(\s*!YAW_LQR_ESO_OUTPUT\.valid",
     "local control mode": r"const\s+auto\s+CTRL_MODE\s*=\s*cmd_\.GetCtrlMode\(\)",
     "local AI status": r"const\s+bool\s+AI_GIMBAL_ACTIVE\s*=\s*cmd_\.GetAIGimbalStatus\(\)",
-    "direct AI config": r"yaw_lqr_eso_\.Calculate\(\s*yaw_lqr_eso_config_",
+    "direct AI calculation": r"yaw_lqr_eso_\.Calculate\(\s*\{",
     "local AI output": r"const\s+auto\s+YAW_LQR_ESO_OUTPUT\s*=\s*yaw_lqr_eso_\.Calculate",
-    "AI controller dispatch": r"if\s*\(\s*yaw_ai_controller_\s*==\s*YawAiController::SMC\s*\)",
-    "manual controller dispatch": r"yaw_manual_controller_\s*==\s*YawManualController::SMC",
-    "direct SMC config": r"yaw_smc_\.Calculate\(\s*yaw_smc_config_",
+    "AI controller dispatch": r"if\s*\(\s*PARAM\.yaw_ai_controller\s*==\s*YawAiController::SMC\s*\)",
+    "manual controller dispatch": r"PARAM\.yaw_manual_controller\s*==\s*YawManualController::SMC",
+    "direct SMC calculation": r"yaw_smc_\.Calculate\(\s*\{",
     "local SMC output": r"const\s+auto\s+YAW_SMC_OUTPUT\s*=\s*yaw_smc_\.Calculate",
-    "manual SMC solver": r"void\s+SolveManualYawSmc\s*\(\s*float&\s+yaw_output\s*\)",
+    "manual SMC solver": r"void\s+SolveManualYawSmc\s*\(\s*const\s+CycleFeedforward&\s+feedforward",
     "shared SMC solver": r"void\s+SolveSmcYaw\s*\(\s*float\s+theta_ref",
 }
 

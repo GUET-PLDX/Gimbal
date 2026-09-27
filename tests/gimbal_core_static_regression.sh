@@ -84,58 +84,79 @@ need_state 'ChassisMotionMode mode = ChassisMotionMode::NON_ROTOR' \
   'non-rotor default chassis mode'
 
 forbid 'CONTROL_DT_(MIN|MAX)|dt_valid_' 'control period validity guard'
-need 'static constexpr uint32_t IMU_TIMEOUT_US = 50000U' \
-  'exact 50000 us IMU timeout'
-need 'LibXR::MicrosecondTimestamp last_euler_rx_time_' \
-  'independent 64-bit Euler receive timestamp'
-need 'LibXR::MicrosecondTimestamp last_gyro_rx_time_' \
-  'independent 64-bit gyro receive timestamp'
-need 'bool euler_received_ = false' 'explicit Euler sample presence'
-need 'bool gyro_received_ = false' 'explicit gyro sample presence'
+need 'LibXR::MicrosecondTimestamp last_online_time_' \
+  'wall-clock timestamp backing the measured control period'
+forbid 'CONTROL_DT_S' 'fixed control period constant (period is measured)'
 need_multiline \
-  '(?s)void SubmitRelaxOutput\(\) \{.*pid_pit_omega_\.SetFeedForward\(0\.0f\);.*pid_yaw_omega_\.SetFeedForward\(0\.0f\);.*last_pit_angle_loop_omega_ = 0\.0f;.*last_yaw_angle_loop_omega_ = 0\.0f;.*motor_yaw_->Relax\(\);\s*motor_pit_->Relax\(\);\s*\}' \
+  'const auto NOW = LibXR::Timebase::GetMicroseconds\(\);\s*this->dt_ = \(NOW - this->last_online_time_\)\.ToSecondf\(\);\s*this->last_online_time_ = NOW;' \
+  'control period measured from the wall clock each cycle'
+forbid 'IMU_TIMEOUT_US' 'gyro freshness timeout constant'
+forbid 'last_gyro_rx_time_' 'gyro receive timestamp member'
+forbid 'last_euler_rx_time_' 'unused Euler receive timestamp'
+forbid 'euler_received_' 'redundant Euler sample-presence flag'
+forbid 'gyro_received_' 'redundant gyro sample-presence flag'
+need_multiline \
+  '(?s)YawAngleTopic\(\)\.Publish\(yaw_encoder_relative_angle\);\s*PitchAngleTopic\(\)\.Publish\(pitch_encoder_relative_angle\);\s*YawOmegaTopic\(\)\.Publish\(gyro_data_\.z\(\)\);\s*PitchOmegaTopic\(\)\.Publish\(gyro_data_\.y\(\)\);\s*uint8_t mode = static_cast<uint8_t>\(current_mode_\);\s*ModeTopic\(\)\.Publish\(mode\);' \
+  'unconditional angle and omega publishes without freshness gating'
+need_multiline \
+  '(?s)void SubmitRelaxOutput\(\) \{.*pid_pit_omega_\.SetFeedForward\(0\.0f\);.*pid_yaw_omega_\.SetFeedForward\(0\.0f\);.*motor_yaw_->Relax\(\);\s*motor_pit_->Relax\(\);\s*\}' \
   'shared RELAX path clears controller state and submits zero output'
-need 'last_pit_angle_loop_omega_' 'Pitch angle-loop history'
-need 'last_yaw_angle_loop_omega_' 'Yaw angle-loop history'
+need 'pid_pit_angle_\.LastOutput' 'Pitch angle-loop history from PID'
+need 'pid_yaw_angle_\.LastOutput' 'Yaw angle-loop history from PID'
 need 'pid_pit_omega_\.SetFeedForward' 'Pitch LibXR feedforward'
 need 'pid_yaw_omega_\.SetFeedForward' 'Yaw LibXR feedforward'
 need_multiline \
   '(?s)void Control\(\) \{.*float pit_output = 0\.0f;.*float yaw_output = 0\.0f;.*Solve\(pit_output, yaw_output\);' \
   'Control owns current-cycle torque outputs'
-need 'void Solve\(float& pit_output, float& yaw_output\)' \
+need 'void Solve\(const CycleFeedforward& feedforward, float& pit_output,' \
   'Solve writes current-cycle torque outputs by reference'
 forbid 'float pit_output_ =|float yaw_output_ =' \
   'persistent control output members'
+forbid 'float (yaw|pitch)_(omega|alpha)_feedforward_ =' \
+  'persistent per-cycle feedforward members'
 need_multiline \
-  '-\s*this->pit_lc_ \* sinf\(euler_\.Pitch\(\) \+ this->pit_theta_\)' \
+  'struct CycleFeedforward \{\s*float yaw_omega = 0\.0f;\s*float yaw_alpha = 0\.0f;\s*float yaw_angle = 0\.0f;\s*float pitch_omega = 0\.0f;\s*float pitch_alpha = 0\.0f;\s*float pitch_angle = 0\.0f;\s*bool ai_yaw_active = false;\s*\};' \
+  'per-cycle feedforward value type'
+need_multiline \
+  'const auto FEEDFORWARD = gimbal->ParseCMD\(\);\s*gimbal->Control\(FEEDFORWARD\);' \
+  'thread-local ParseCMD to Control feedforward flow'
+need 'CycleFeedforward ParseCMD\(\)' \
+  'ParseCMD returns per-cycle feedforward values'
+need 'void Control\(const CycleFeedforward& feedforward\)' \
+  'Control consumes per-cycle feedforward values'
+need 'void Solve\(const CycleFeedforward& feedforward, float& pit_output,' \
+  'Solve consumes per-cycle feedforward values'
+need_multiline \
+  '-\s*PARAM\.pit_lc \* sinf\(euler_\.Pitch\(\) \+ PARAM\.pit_theta\)' \
   'unchanged Pitch gravity formula'
 forbid 'target_.*omega.*last_.*omega' 'derivative of total target omega'
 forbid 'SleepUntil' 'SleepUntil scheduling'
 forbid 'Telemetry' 'Telemetry structure'
-forbid 'float torque_|this->torque_' \
+forbid 'float torque_[A-Za-z0-9_]*[;=]|this->torque_' \
   'duplicate Pitch gravity feedforward debug cache'
 
 need_set_mode \
   'if \(gimbal_event == current_mode_\) \{\s*return;\s*\}' \
   'same-mode transition returns without resetting control state'
 need_set_mode \
-  '(?s)current_mode_ == GimbalEvent::SET_MODE_COMMON.*gimbal_event == GimbalEvent::SET_MODE_LOW_SENSITIVITY.*current_mode_ == GimbalEvent::SET_MODE_LOW_SENSITIVITY.*gimbal_event == GimbalEvent::SET_MODE_COMMON.*current_mode_ = gimbal_event;\s*return;' \
-  'COMMON and LOW_SENSITIVITY switch without resetting control state'
+  'current_mode_ = gimbal_event;\s*switch \(gimbal_event\)' \
+  'target mode is latched once before the transition switch'
+need_set_mode_count 'current_mode_ = gimbal_event;' 1 \
+  'single mode latch replaces per-branch assignment'
 need_set_mode_before 'if \(gimbal_event == current_mode_\)' \
   'pid_pit_omega_\.SetFeedForward\(0\.0f\)' \
   'same-mode return precedes feedforward and history cleanup'
-need_set_mode_before \
-  'if \(\(current_mode_ == GimbalEvent::SET_MODE_COMMON' \
-  'pid_pit_omega_\.SetFeedForward\(0\.0f\)' \
-  'COMMON and LOW_SENSITIVITY return precedes feedforward and history cleanup'
-need_set_mode_count 'pid_pit_omega_\.SetFeedForward\(0\.0f\)' 8 \
+forbid \
+  'SET_MODE_LOW_SENSITIVITY|ApplyOperatorGimbalSensitivity|SetOperatorGimbalSensitivity' \
+  'removed low-sensitivity mode and its operator sensitivity hook'
+need_set_mode_count 'pid_pit_omega_\.SetFeedForward\(0\.0f\)' 7 \
   'Pitch feedforward cleanup is shared'
-need_set_mode_count 'pid_yaw_omega_\.SetFeedForward\(0\.0f\)' 8 \
+need_set_mode_count 'pid_yaw_omega_\.SetFeedForward\(0\.0f\)' 7 \
   'Yaw feedforward cleanup is shared'
-need_set_mode_count 'last_pit_angle_loop_omega_ = 0\.0f' 8 \
-  'Pitch angle-loop history cleanup is shared'
-need_set_mode_count 'last_yaw_angle_loop_omega_ = 0\.0f' 8 \
-  'Yaw angle-loop history cleanup is shared'
+need_set_mode_count 'pid_pit_angle_\.Reset\(\)' 7 \
+  'Pitch angle PID reset clears LastOutput'
+need_set_mode_count 'pid_yaw_angle_\.Reset\(\)' 7 \
+  'Yaw angle PID reset clears LastOutput'
 
 if [[ "$MODE" != "core" ]]; then
   need 'target_yaw_dot_ = YAW_OPERATOR_RATE' 'manual Yaw rate feedforward'
@@ -148,6 +169,13 @@ need 'patrol_pitch_angular_rate_rad_s: 0\.0' \
   'SI Pitch patrol angular-rate manifest key'
 need 'patrol_yaw_rate_rad_s: 0\.0' 'SI Yaw patrol rate manifest key'
 forbid 'patrol_range|patrol_omega' 'legacy patrol configuration names'
+need 'struct PatrolState \{' 'patrol session state aggregate'
+need 'PatrolState patrol_' 'single owner for patrol session state'
+forbid 'patrol_pitch_center_rad_|patrol_yaw_origin_rad_|patrol_start_time_' \
+  'loose patrol session state members'
+need_multiline \
+  'patrol_ = \{\.pitch_center_rad = euler_\.Pitch\(\),\s*\.yaw_origin_rad = euler_\.Yaw\(\),\s*\.start_time = LibXR::Timebase::GetMilliseconds\(\)\};' \
+  'atomic patrol origin latch on AUTOPATROL entry'
 forbid '  - pldx/Referee|#include "Referee.hpp"|Referee\* referee|referee_|referee:' \
   'unused Referee interface dependency'
 forbid '#include <cstdlib>|#include <cstring>|#define UI_GIMBAL_LAYER' \
@@ -187,11 +215,13 @@ need 'bool rotor_ff_enabled_ = false' 'default-disabled feature flag member'
 need 'ChassisMotionState chassis_motion_state_\{\}' \
   'default-initialized semantic chassis motion state member'
 
-need_before 'FindOrCreate<ChassisMotionState>' 'thread_\.Create' \
+need_before 'ChassisMotionStateTopic\(\);' 'thread_\.Create' \
   'chassis motion state Topic must exist before the Gimbal thread starts'
 need_multiline \
-  'ASyncSubscriber<ChassisMotionState>\s+chassis_motion_state_suber\s*\(\s*LibXR::Topic\(gimbal->chassis_motion_state_topic_\)\s*\)' \
-  'typed chassis motion state subscriber constructed from its pre-created handle'
+  'ASyncSubscriber<ChassisMotionState>\s+chassis_motion_state_suber\s*\(\s*ChassisMotionStateTopic\(\)\s*\)' \
+  'typed chassis motion state subscriber constructed from the shared static handle'
+forbid 'chassis_motion_state_topic_' \
+  'per-instance chassis motion state Topic handle'
 need_multiline \
   '(?s)chassis_motion_state_suber\.StartWaiting\(\);.*while \(true\).*chassis_motion_state_suber\.Available\(\).*chassis_motion_state_\s*=\s*chassis_motion_state_suber\.GetData\(\);.*chassis_motion_state_suber\.StartWaiting\(\);' \
   'latest typed chassis motion state Topic polling and re-arm'
@@ -203,7 +233,7 @@ need_multiline \
   'const float YAW_MOTOR_OMEGA_REF =\s*ROTOR_FF_ACTIVE\s*\? TARGET_YAW_OMEGA - chassis_motion_state_\.yaw_rate_rad_s\s*: TARGET_YAW_OMEGA;' \
   'subtractive ROTOR-relative Yaw resistance reference'
 need_multiline \
-  'const float YAW_FEEDFORWARD =\s*j_yaw_ \* YAW_ALPHA \+ yaw_k_ \* YAW_MOTOR_OMEGA_REF;' \
+  'const float YAW_FEEDFORWARD =\s*PARAM\.j_yaw \* YAW_ALPHA \+ PARAM\.yaw_k \* YAW_MOTOR_OMEGA_REF;' \
   'relative reference used only by existing yaw resistance feedforward'
 need 'pid_yaw_omega_\.Calculate\(TARGET_YAW_OMEGA, gyro_data_\.z\(\), dt_\)' \
   'unchanged Yaw speed-loop target'
@@ -213,8 +243,34 @@ need 'CreateTopic<float>\("yawmotor_omega"\)' \
   'yaw IMU omega topic for vision gimbal feedback'
 need 'CreateTopic<float>\("pitchmotor_omega"\)' \
   'pitch IMU omega topic for vision gimbal feedback'
+forbid 'LibXR::Topic topic_(yaw_angle|pit_angle|yaw_omega|pit_omega|mode|vision_task)_' \
+  'Topic handles stored as Gimbal instance members'
 need_multiline \
-  '(?s)topic_yaw_omega_\.Publish\(gyro_data_\.z\(\)\);\s*topic_pit_omega_\.Publish\(gyro_data_\.y\(\)\);' \
+  'static LibXR::Topic& YawAngleTopic\(\) \{\s*static LibXR::Topic topic =\s*LibXR::Topic::CreateTopic<float>\("yawmotor_angle"\);\s*return topic;\s*\}' \
+  'lazy singleton Yaw angle topic accessor'
+need_multiline \
+  'static LibXR::Topic& PitchAngleTopic\(\) \{\s*static LibXR::Topic topic =\s*LibXR::Topic::CreateTopic<float>\("pitchmotor_angle"\);\s*return topic;\s*\}' \
+  'lazy singleton Pitch angle topic accessor'
+need_multiline \
+  'static LibXR::Topic& YawOmegaTopic\(\) \{\s*static LibXR::Topic topic =\s*LibXR::Topic::CreateTopic<float>\("yawmotor_omega"\);\s*return topic;\s*\}' \
+  'lazy singleton Yaw omega topic accessor'
+need_multiline \
+  'static LibXR::Topic& PitchOmegaTopic\(\) \{\s*static LibXR::Topic topic =\s*LibXR::Topic::CreateTopic<float>\("pitchmotor_omega"\);\s*return topic;\s*\}' \
+  'lazy singleton Pitch omega topic accessor'
+need_multiline \
+  'static LibXR::Topic& ModeTopic\(\) \{\s*static LibXR::Topic topic =\s*LibXR::Topic::CreateTopic<uint8_t>\("gimbal_mode"\);\s*return topic;\s*\}' \
+  'lazy singleton mode topic accessor'
+need_multiline \
+  'static LibXR::Topic& VisionTaskTopic\(\) \{\s*static LibXR::Topic topic =\s*LibXR::Topic::CreateTopic<uint8_t>\("vision_task"\);\s*return topic;\s*\}' \
+  'lazy singleton vision-task topic accessor'
+need_multiline \
+  'static void InitializeTopics\(\) \{\s*YawAngleTopic\(\);\s*PitchAngleTopic\(\);\s*YawOmegaTopic\(\);\s*PitchOmegaTopic\(\);\s*ModeTopic\(\);\s*VisionTaskTopic\(\);\s*\}' \
+  'constructor-time initialization of all lazy Topic handles'
+need_multiline \
+  '(?s)Gimbal\(.*?\)\s*:.*?\{\s*UNUSED\(app\);\s*InitializeTopics\(\);\s*ChassisMotionStateTopic\(\);\s*thread_\.Create\(' \
+  'Topic initialization before the Gimbal thread starts'
+need_multiline \
+  '(?s)YawOmegaTopic\(\)\.Publish\(gyro_data_\.z\(\)\);\s*PitchOmegaTopic\(\)\.Publish\(gyro_data_\.y\(\)\);' \
   'omega topics use Gimbal-mapped gyro yaw z and pitch y'
 
 echo 'PASS: Gimbal core static regression checks'

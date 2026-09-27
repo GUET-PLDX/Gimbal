@@ -150,24 +150,29 @@ constexpr std::array<double, 4> PLANT_B_VALUES{{0.0, 0.1, 0.2, 0.3}};
 constexpr std::array<double, 3> DISTURBANCE_VALUES{{-0.2, 0.0, 0.2}};
 constexpr std::array<std::size_t, 2> MISMATCH_SCENARIO_INDICES{{5U, 7U}};
 
+// 控制器在构造期锁存配置，因此增益覆盖必须发生在构造之前。
+static YawLqrEso::Config controller_config(ControllerKind kind) {
+  YawLqrEso::Config config = base_yaw_config();
+  switch (kind) {
+    case ControllerKind::PID:
+    case ControllerKind::LQR_1_1:
+      break;
+    case ControllerKind::LQR_3_8_1_1:
+      config.k_theta = 3.8f;
+      config.k_omega = 1.1f;
+      break;
+    case ControllerKind::LQR_12_3_4:
+      config.k_theta = 12.0f;
+      config.k_omega = 3.4f;
+      break;
+  }
+  return config;
+}
+
 class ControllerAdapter final {
  public:
   explicit ControllerAdapter(ControllerKind kind)
-      : kind_(kind), config_(base_yaw_config()) {
-    switch (kind_) {
-      case ControllerKind::PID:
-      case ControllerKind::LQR_1_1:
-        break;
-      case ControllerKind::LQR_3_8_1_1:
-        config_.k_theta = 3.8f;
-        config_.k_omega = 1.1f;
-        break;
-      case ControllerKind::LQR_12_3_4:
-        config_.k_theta = 12.0f;
-        config_.k_omega = 3.4f;
-        break;
-    }
-  }
+      : kind_(kind), controller_(controller_config(kind)) {}
 
   void Reset(PlantState state) {
     pid_.Reset();
@@ -189,7 +194,6 @@ class ControllerAdapter final {
     }
 
     const YawLqrEso::Output OUTPUT = controller_.Calculate(
-        config_,
         {.theta_rad = static_cast<float>(reference.theta),
          .omega_rad_s = static_cast<float>(reference.omega),
          .alpha_rad_s2 = static_cast<float>(reference.alpha)},
@@ -198,7 +202,8 @@ class ControllerAdapter final {
          .tau_meas_nm = 0.0f,
          .valid = true,
          .torque_measurement_valid = true},
-        static_cast<float>(dt), TEST_YAW_J_KG_M2, TEST_YAW_TORQUE_LIMIT_NM);
+        static_cast<float>(dt), TEST_YAW_J_KG_M2, TEST_YAW_TORQUE_LIMIT_NM,
+        TEST_YAW_B_NMS_RAD);
     return {
         .torque = static_cast<double>(OUTPUT.tau_cmd_nm),
         .z3 = static_cast<double>(OUTPUT.z3),
@@ -216,13 +221,12 @@ class ControllerAdapter final {
     }
   }
 
-  const YawLqrEso::Config& Config() const { return config_; }
+  const YawLqrEso::Config& Config() const { return controller_.GetConfig(); }
 
   bool IsPid() const { return kind_ == ControllerKind::PID; }
 
  private:
   ControllerKind kind_;
-  YawLqrEso::Config config_;
   PidYawAdapter pid_;
   YawLqrEso controller_;
 };

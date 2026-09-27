@@ -26,15 +26,17 @@ inline void check_near(float actual, float expected, float tolerance,
 #define CHECK_NEAR(ACTUAL, EXPECTED, TOL) \
   check_near((ACTUAL), (EXPECTED), (TOL), #ACTUAL, __LINE__)
 
+// 被控对象惯量已从 Config 移出、改为按调用传入，主机测试统一使用该基准值。
+inline constexpr float BASE_YAW_SMC_J_KG_M2 = 0.03f;
+
 inline YawSmc::Config base_yaw_smc_config() {
-  return {.j_kg_m2 = 0.03f,
-          .c = 20.0f,
+  return {.c = 20.0f,
           .k = 2.0f,
           .epsilon = 0.5f,
           .q = 21.0f,
           .p = 27.0f,
           .error_deadband_rad = 0.0f,
-          .ftsmc_switch_rad = 0.0174533f,
+          .ftsmc_switch_rad = static_cast<float>(LibXR::PI / 180.0),
           .sat_boundary = 1.0f,
           .torque_soft_limit_nm = 2.0f,
           .torque_min_nm = -2.223f,
@@ -73,7 +75,8 @@ struct SmcCodeOracle {
 
 inline SmcCodeOracle smc_code_oracle(const YawSmc::Config& config,
                                      const YawSmc::Reference& reference,
-                                     const YawSmc::Feedback& feedback) {
+                                     const YawSmc::Feedback& feedback,
+                                     float j_kg_m2) {
   SmcCodeOracle oracle{};
   oracle.e_theta_rad =
       LibXR::CycleValue<float>(feedback.theta_rad) - reference.theta_rad;
@@ -84,7 +87,7 @@ inline SmcCodeOracle smc_code_oracle(const YawSmc::Config& config,
     return oracle;
   }
 
-  oracle.tau_ff_alpha_nm = config.j_kg_m2 * reference.alpha_rad_s2;
+  oracle.tau_ff_alpha_nm = j_kg_m2 * reference.alpha_rad_s2;
   const float ABS_E_THETA_RAD = std::fabs(oracle.e_theta_rad);
   oracle.used_ftsmc =
       config.ftsmc_enable && ABS_E_THETA_RAD >= config.ftsmc_switch_rad;
@@ -100,7 +103,7 @@ inline SmcCodeOracle smc_code_oracle(const YawSmc::Config& config,
   }
   oracle.sat_s = sat(oracle.s / config.sat_boundary);
   oracle.tau_smc_nm =
-      config.j_kg_m2 *
+      j_kg_m2 *
       (-surface_dot_term - config.epsilon * oracle.sat_s - config.k * oracle.s);
   oracle.tau_pre_limit_nm = oracle.tau_ff_alpha_nm + oracle.tau_smc_nm;
   return oracle;

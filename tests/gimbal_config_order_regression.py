@@ -1,12 +1,17 @@
 import argparse
+import math
 import pathlib
 import re
+import struct
 
 import yaml
 
 
 MODULE_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROOT = MODULE_ROOT.parent.parent
+# YAML 里的构造参数键名只是标签（xrobot_gen_main 按位置展开），sentry 配置中该聚合参数
+# 写作 `GimbalParam`；模块 manifest 内仍沿用与 C++ 形参同名的 `gimbal_param`。
+GIMBAL_PARAM_KEY = "GimbalParam"
 PATROL_KEYS = (
     "patrol_pitch_amplitude_rad",
     "patrol_pitch_angular_rate_rad_s",
@@ -21,7 +26,6 @@ LEGACY_PATROL_KEYS = {"patrol_range", "patrol_omega"}
 
 
 EXPECTED_FIELDS = (
-    "b_nms_rad",
     "k_theta",
     "k_omega",
     "k_i",
@@ -48,7 +52,6 @@ EXPECTED_FIELDS = (
 )
 
 SMC_EXPECTED_FIELDS = (
-    "j_kg_m2",
     "c",
     "k",
     "epsilon",
@@ -66,14 +69,13 @@ SMC_EXPECTED_FIELDS = (
 )
 
 SMC_EXPECTED_DEFAULTS = {
-    "j_kg_m2": 0.03,
     "c": 20.0,
     "k": 120.0,
     "epsilon": 0.5,
     "q": 21.0,
     "p": 27.0,
     "error_deadband_rad": 0.0,
-    "ftsmc_switch_rad": 0.0174533,
+    "ftsmc_switch_rad": math.pi / 180,
     "sat_boundary": 1.0,
     "torque_soft_limit_nm": 2.0,
     "torque_min_nm": -2.223,
@@ -84,7 +86,6 @@ SMC_EXPECTED_DEFAULTS = {
 }
 
 EXPECTED_DEFAULTS = {
-    "b_nms_rad": 0.0,
     "k_theta": 1.0,
     "k_omega": 1.0,
     "k_i": 0.2,
@@ -145,6 +146,57 @@ def mapping_from_manifest(manifest_args, key):
         raise SystemExit(f"{key} manifest config must be a mapping")
     return item
 
+
+# `Config` 默认值允许使用与 BMI088 同款的 π/180 派生表达式（避免魔法数字）。
+CANONICAL_EXPRESSIONS = {"static_cast<float>(LibXR::PI / 180.0)": math.pi / 180.0}
+
+
+def f32(value):
+    """Round a value to float32 so C++ `0.1f` literals compare equal to YAML 0.1."""
+    return struct.unpack("f", struct.pack("f", float(value)))[0]
+
+
+def config_defaults(source, struct_name):
+    """Extract `name{literal}` default member initializers from a Config struct.
+
+    `static_assert` cannot read the YAML manifest, so the "C++ defaults must equal
+    the manifest defaults" contract is enforced here instead.
+    """
+    algorithm = re.sub(r"//.*?$|/\*.*?\*/", "", source, flags=re.M | re.S)
+    block = re.search(
+        r"struct " + struct_name + r"\s*\{(.*?)\n\s*\};", algorithm, re.S
+    )
+    if block is None:
+        raise SystemExit(f"{struct_name} struct not found")
+    defaults = {}
+    for declaration in re.finditer(
+        r"\b(?:float|bool)\s+([a-z][a-z0-9_]*)\s*\{([^}]*)\}", block.group(1)
+    ):
+        name, literal = declaration.group(1), declaration.group(2).strip()
+        if literal == "":
+            defaults[name] = 0.0
+        elif literal.rstrip("fF") in ("true", "false"):
+            defaults[name] = literal.rstrip("fF") == "true"
+        elif literal in CANONICAL_EXPRESSIONS:
+            defaults[name] = f32(CANONICAL_EXPRESSIONS[literal])
+        else:
+            defaults[name] = f32(literal.rstrip("fF"))
+    return defaults
+
+
+def check_cpp_defaults(defaults, expected, label):
+    if tuple(defaults) != tuple(expected):
+        raise SystemExit(f"{label} C++ Config default order mismatch")
+    for key, expected_value in expected.items():
+        actual_value = defaults[key]
+        if type(actual_value) is not type(expected_value):
+            raise SystemExit(f"{label} C++ Config default type mismatch: {key}")
+        if isinstance(expected_value, float):
+            if actual_value != f32(expected_value):
+                raise SystemExit(f"{label} C++ Config default mismatch: {key}")
+        elif actual_value != expected_value:
+            raise SystemExit(f"{label} C++ Config default mismatch: {key}")
+
 lqr_fields = config_fields(pathlib.Path(args.algorithm).read_text(), "Config")
 if lqr_fields != EXPECTED_FIELDS:
     raise SystemExit("LQR Config order mismatch")
@@ -169,39 +221,48 @@ if "referee" in manifest_names:
     raise SystemExit("unused Referee parameter remains in Gimbal manifest")
 if LEGACY_PATROL_KEYS & set(manifest_names):
     raise SystemExit("legacy patrol parameters remain in Gimbal manifest")
-patrol_start = manifest_names.index("yaw_zero") + 1
-if tuple(manifest_names[patrol_start : patrol_start + len(PATROL_KEYS)]) != PATROL_KEYS:
-    raise SystemExit("patrol constructor order mismatch")
+gimbal_param = mapping_from_manifest(manifest_args, "gimbal_param")
+expected_gimbal_param = (
+    "pit_max_angle",
+    "pit_min_angle",
+    "pit_lc",
+    "pit_theta",
+    "yaw_k",
+    "j_pit",
+    "j_yaw",
+    "pit_zero",
+    "yaw_zero",
+    "patrol_pitch_amplitude_rad",
+    "patrol_pitch_angular_rate_rad_s",
+    "patrol_yaw_rate_rad_s",
+    "reverse_flag",
+    "thread_priority",
+    "rotor_ff_enabled",
+    "yaw_manual_controller",
+    "yaw_ai_controller",
+)
+if tuple(gimbal_param.keys()) != expected_gimbal_param:
+    raise SystemExit("GimbalParam field order mismatch")
 pid_yaw_omega = next(
     item["pid_yaw_omega"] for item in manifest_args if "pid_yaw_omega" in item
 )
 if pid_yaw_omega.get("out_limit") != 2.223:
     raise SystemExit("pid_yaw_omega out_limit must be the shared Yaw torque limit")
 expected_tail = [
-    "rotor_ff_enabled",
-    "yaw_manual_controller",
-    "yaw_ai_controller",
+    "gimbal_param",
     "yaw_lqr_eso",
     "yaw_smc",
 ]
-if manifest_names[-5:] != expected_tail:
+if manifest_names[-3:] != expected_tail:
     raise SystemExit("manifest constructor order mismatch")
 if "ai_yaw_lqr_eso_enable" in manifest_names:
     raise SystemExit("removed route master remains in manifest")
 if {"euler_topic_name", "gyro_topic_name"} & set(manifest_names):
     raise SystemExit("removed Gimbal IMU Topic parameters remain in manifest")
-yaw_manual_controller = next(
-    item["yaw_manual_controller"]
-    for item in manifest_args
-    if "yaw_manual_controller" in item
-)
+yaw_manual_controller = gimbal_param["yaw_manual_controller"]
 if yaw_manual_controller != "YawManualController::PID":
     raise SystemExit("manifest default manual controller mismatch")
-yaw_ai_controller = next(
-    item["yaw_ai_controller"]
-    for item in manifest_args
-    if "yaw_ai_controller" in item
-)
+yaw_ai_controller = gimbal_param["yaw_ai_controller"]
 if yaw_ai_controller != "YawAiController::LQR_ESO":
     raise SystemExit("manifest default AI controller mismatch")
 yaw_manifest = mapping_from_manifest(manifest_args, "yaw_lqr_eso")
@@ -221,6 +282,19 @@ for key, expected_value in SMC_EXPECTED_DEFAULTS.items():
     if type(actual_value) is not type(expected_value) or actual_value != expected_value:
         raise SystemExit(f"SMC manifest default mismatch: {key}")
 
+# C++ 结构体默认值必须逐字段等于 manifest 默认值：两者分叉会让"省略键就用默认值"
+# 这件事失真（曾经 C++ 侧全零、manifest 侧是正增益，全零配置能通过校验 → 静默零增益）。
+check_cpp_defaults(
+    config_defaults(pathlib.Path(args.algorithm).read_text(), "Config"),
+    EXPECTED_DEFAULTS,
+    "LQR",
+)
+check_cpp_defaults(
+    config_defaults(pathlib.Path(args.smc_algorithm).read_text(), "Config"),
+    SMC_EXPECTED_DEFAULTS,
+    "SMC",
+)
+
 if not args.header_only:
     if args.config is None:
         raise SystemExit("--config is required without --header-only")
@@ -231,14 +305,16 @@ if not args.header_only:
         raise SystemExit("unused Referee parameter remains in Gimbal YAML")
     if LEGACY_PATROL_KEYS & set(gimbal_args):
         raise SystemExit("legacy patrol parameters remain in target YAML")
+    target_gimbal_param = gimbal_args[GIMBAL_PARAM_KEY]
     for key, expected_value in PATROL_VALUES.items():
-        if gimbal_args.get(key) != expected_value:
+        if target_gimbal_param.get(key) != expected_value:
             raise SystemExit(f"target YAML patrol value mismatch: {key}")
     if "ai_yaw_lqr_eso_enable" in gimbal_args:
         raise SystemExit("removed route master remains in target YAML")
-    if gimbal_args.get("yaw_manual_controller") != "YawManualController::SMC":
+    target_gimbal_param = gimbal_args[GIMBAL_PARAM_KEY]
+    if target_gimbal_param.get("yaw_manual_controller") != "YawManualController::SMC":
         raise SystemExit("sentry gimbal YAML must select SMC for manual Yaw")
-    if gimbal_args.get("yaw_ai_controller") != "YawAiController::SMC":
+    if target_gimbal_param.get("yaw_ai_controller") != "YawAiController::SMC":
         raise SystemExit("sentry gimbal YAML must select SMC for AI Yaw")
     yaw_yaml = gimbal_args["yaw_lqr_eso"]
     if "j_kg_m2" in yaw_yaml:

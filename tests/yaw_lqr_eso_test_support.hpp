@@ -26,10 +26,11 @@ inline void check_near(float actual, float expected, float tolerance,
 
 inline constexpr float TEST_YAW_J_KG_M2 = 0.03f;
 inline constexpr float TEST_YAW_TORQUE_LIMIT_NM = 2.223f;
+// 被控对象阻尼已从 Config 移出、改为按调用传入，主机测试统一使用该基准值。
+inline constexpr float TEST_YAW_B_NMS_RAD = 0.0f;
 
 inline YawLqrEso::Config base_yaw_config() {
-  return {.b_nms_rad = 0.0f,
-          .k_theta = 1.0f,
+  return {.k_theta = 1.0f,
           .k_omega = 1.0f,
           .k_i = 0.2f,
           .theta_integral_limit_rad_s = 0.5f,

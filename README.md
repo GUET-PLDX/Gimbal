@@ -33,6 +33,36 @@ tau_smc = J * (-surface_dot_term - epsilon * Sat(s) - k * s)
 
 运行时保留参考代码的宽松 `p/q` 行为，不增加奇数校验。修复参考运动学与 FTSMC 负误差方向后，移动目标和负方向输出会与旧实现不同。升级后应重新执行正负角度阶跃、匀速目标和加速目标测试，再进行实车参数整定。
 
+### Yaw 控制器配置归属（Config Embedding）
+
+`YawSmc` 与 `YawLqrEso` 各自持有一份 `const Config config_`：配置在**构造期锁存、运行期只读**，`Calculate()` 不再接收 `Config` 形参。被控对象参数（`j_yaw` / `yaw_k` / 硬限幅 `pid_yaw_omega.OutLimit()`）仍按调用传入，**不进入 `Config`**。
+
+```cpp
+YawSmc yaw_smc{config};                       // 配置随实例一起构造
+yaw_smc.Calculate(reference, feedback, dt_s, j_kg_m2);
+```
+
+升级时需要注意的语义变化：
+
+1. 两个控制器**不再有默认构造**，也不再可拷贝/移动赋值（实例内含 `const` 成员）。`Gimbal` 的成员因此从 4 个（`*_config_` + 控制器）收敛为 2 个。
+2. **不再支持运行期更换配置**。原先 7 个 `previous_*_enable_` 边沿标志已删除，其中 `eso_comp` / `coulomb` / `lqi` 三个本来就是只写不读的死成员。替代物是 `slew_primed_` / `bias_primed_` 两个「首周期播种」标志；ESO 的首周期初始化仍由既有的 `observer_fresh_` 承担（构造期 `Reset(0,0,0)` 会置位）。相应地，"运行期禁用再重新使能某功能"的场景不存在了，原先覆盖这些下降沿/再入沿的测试改为按配置拆分实例，断言值不变。
+3. `Gimbal` 在构造期用 `REQUIRE(Yaw*::ValidateConfig(...))` 校验锁存配置，**校验失败会打印 `Fatal error at file:line` 并永久挂起**，不再像以前那样在运行期静默输出零力矩。校验放在初始化列表的 `CheckedSmcConfig()` / `CheckedLqrEsoConfig()` 内，保证早于控制线程启动；`REQUIRE` 只允许出现在 `Gimbal.hpp`（主机测试不链接 `libxr_fatal_error`）。
+4. 这些改动**没有内存收益**（配置总得存在某处），收益是「配置 + 状态」单一归属，以及整体删除一套边沿状态机。
+
+### 配置默认值的归属约定
+
+同一份 `Config` 有两处「默认值」，角色不同、且**必须一致**：
+
+| 位置 | 角色 | 谁守护 |
+| --- | --- | --- |
+| `Gimbal.hpp` manifest 里 `yaw_lqr_eso` / `yaw_smc` 块的取值 | **建议基线**（IDE/CubeMX 展示、生成 YAML 的初值）。**不是实车整定值** | `tests/gimbal_config_order_regression.py` 校验字段顺序 + 取值 |
+| `YawSmc::Config` / `YawLqrEso::Config` 的成员默认值 | 必须**逐字段等于**上面的建议基线，因此 `Config{}` 是**可用**配置，不是全零哨兵 | 同一脚本逐字段比对（`static_assert` 读不到 YAML，故用 Python 守护；对浮点按 float32 归一化比较） |
+
+配套两条硬约束：
+
+1. **`Gimbal` 的 `yaw_lqr_eso` / `yaw_smc` 形参没有默认实参。** `xrobot_gen_main` 按位置展开 `constructor_args`，YAML 漏掉某个键时它会**丢弃该实参**而不是回退到 manifest 默认值，导致其后实参整体左移（实测：省掉 `yaw_lqr_eso` 会把 `yaw_smc` 的聚合值喂给 `yaw_lqr_eso`）。让最后一个形参没有默认值，"漏键"就从静默错配变成**编译错误**。
+2. **`k_theta` / `k_omega` 必须严格为正**（`YawSmc` 侧对应 `c > 0`）。两者同时为 0 时角度环与角速度环一起失效、控制器静默输出零力矩——"配置被整块清零 / 聚合实参被截断"恰好是这个形状。这是上电校验（`REQUIRE`）能拦住的最后一道防线。
+
 ## 2. 主要函数说明
 1. ThreadFunc: 云台控制主线程。
 2. ParseCMD: 解析 CMD 输入并更新目标。
@@ -44,7 +74,7 @@ tau_smc = J * (-surface_dot_term - epsilon * Sat(s) - k * s)
 ## 3. 接入步骤
 1. 添加模块并绑定 motor_roll、motor_yaw、cmd。
 2. 配置零位、限位、惯量与 PID 参数。
-3. 手动 Yaw 用 `yaw_manual_controller` 选择 `YawManualController::PID` 或 `YawManualController::SMC`。自瞄 Yaw 用 `yaw_ai_controller` 选择 `YawAiController::SMC` 或 `YawAiController::LQR_ESO`。两套选择独立；LQR/ESO 仅自瞄可用。
+3. 手动和自瞄共用同一套 Yaw 算法实例。`yaw_manual_controller` 选 PID 或 SMC，`yaw_ai_controller` 选 SMC 或 LQR/ESO。`gimbal_cmd` 的 yaw/pit 已是绝对角（操作手积分在 CMD 完成，自瞄为视觉轨迹）。
 4. 先验证模式切换，再联调控制参数。首次启用滑模时降低 `yaw_smc.torque_soft_limit_nm`，确认力矩极性后再抬升。
 
 云台姿态输入 topic：
@@ -55,7 +85,7 @@ tau_smc = J * (-surface_dot_term - epsilon * Sat(s) - k * s)
 
 云台状态输出 topic：
 - `yawmotor_angle` / `pitchmotor_angle`：电机绝对角，rad。
-- `yawmotor_omega` / `pitchmotor_omega`：与内环同符号的 IMU 实测角速度，rad/s（yaw=`gyro.z`，pitch=`gyro.y` 已按云台约定取反）。仅在陀螺 50 ms 内新鲜时发布。
+- `yawmotor_omega` / `pitchmotor_omega`：与内环同符号的 IMU 实测角速度，rad/s（yaw=`gyro.z`，pitch=`gyro.y` 已按云台约定取反）。每个控制周期无条件发布，不做陀螺新鲜度判定。
 
 
 标准命令流程：
@@ -120,14 +150,13 @@ constructor_args:
   - yaw_manual_controller: YawManualController::PID
   - yaw_ai_controller: YawAiController::LQR_ESO
   - yaw_smc:
-      j_kg_m2: 0.03
       c: 20.0
       k: 120.0
       epsilon: 0.5
       q: 21.0
       p: 27.0
       error_deadband_rad: 0.0
-      ftsmc_switch_rad: 0.0174533
+      ftsmc_switch_rad: 0.017453292519943295
       sat_boundary: 1.0
       torque_soft_limit_nm: 2.0
       torque_min_nm: -2.223

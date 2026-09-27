@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cmath>
+#include <concepts>
+#include <type_traits>
+#include <utility>
 
 #include "cycle_value.hpp"
 #include "libxr_def.hpp"
@@ -9,23 +12,38 @@
 // torques are represented as rad, rad/s, and N*m respectively.
 class YawSmc final {
  public:
+  /**
+   * @brief Yaw 滑模调参与功能开关。
+   *
+   * @note 默认值**必须与 `Gimbal.hpp` 里 `yaw_smc` 的 manifest
+   * 默认值逐字段一致** （`tests/gimbal_config_order_regression.py`
+   * 会比对，分叉即失败）。 manifest
+   * 的值是**建议基线**，不是实车整定值；实车值在 `User/RobotConfig/`
+   * 下的机器人配置里按位置覆盖。
+   * @note 默认值**不是"未配置"哨兵**：模块不再给 `yaw_smc` 形参默认实参，
+   *       漏配会在编译期报错，因此这里放的是可用配置而不是全零。
+   */
   struct Config {
-    float j_kg_m2{};
-    float c{};
-    float k{};
-    float epsilon{};
-    float q{};
-    float p{};
-    float error_deadband_rad{};
-    float ftsmc_switch_rad{};
-    float sat_boundary{};
-    float torque_soft_limit_nm{};
-    float torque_min_nm{};
-    float torque_max_nm{};
-    float torque_slew_rate_nm_s{};
-    bool ftsmc_enable{};
-    bool torque_slew_enable{};
+    float c{20.0f};
+    float k{120.0f};
+    float epsilon{0.5f};
+    float q{21.0f};
+    float p{27.0f};
+    float error_deadband_rad{0.0f};
+    float ftsmc_switch_rad{static_cast<float>(LibXR::PI / 180.0)};
+    float sat_boundary{1.0f};
+    float torque_soft_limit_nm{2.0f};
+    float torque_min_nm{-2.223f};
+    float torque_max_nm{2.223f};
+    float torque_slew_rate_nm_s{1000.0f};
+    bool ftsmc_enable{true};
+    bool torque_slew_enable{true};
   };
+
+  // xrobot 按声明顺序位置聚合 Config，这三条契约守护该初始化方式。
+  static_assert(std::is_aggregate_v<Config>);
+  static_assert(std::is_trivially_copyable_v<Config>);
+  static_assert(std::is_standard_layout_v<Config>);
 
   struct Reference {
     // 目标角度、角速度和角加速度均使用 SI 单位并直接参与控制律。
@@ -58,12 +76,29 @@ class YawSmc final {
     bool slew_limit_active{};
   };
 
-  static bool ValidateConfig(const Config& config) {
+  /**
+   * @brief 用锁存的配置构造控制器。
+   * @note 不提供默认构造：控制器不能在没有显式配置的情况下存在。
+   *       完美转发对齐 LibXR::PID 的同形构造；requires 约束同时阻止该模板
+   *       劫持隐式拷贝构造（`YawSmc a(b);` 的 ConfigType 是 `const YawSmc&`）。
+   */
+  template <typename ConfigType>
+    requires std::same_as<std::remove_cvref_t<ConfigType>, Config>
+  explicit YawSmc(ConfigType&& config)
+      : config_(std::forward<ConfigType>(config)) {
+    Reset(0.0f, 0.0f, 0.0f);
+  }
+
+  /// @brief 只读配置访问器（诊断与主机测试用）。
+  [[nodiscard]] const Config& GetConfig() const noexcept { return config_; }
+
+  static bool ValidateConfig(const Config& config, float j_kg_m2) {
     // Keep the source implementation's permissive p/q behavior: no odd
     // integer check is added at runtime.
-    if (!AllConfigFloatsFinite(config) || config.j_kg_m2 <= MIN_J_KG_M2 ||
-        config.c <= 0.0f || config.k < 0.0f || config.epsilon < 0.0f ||
-        config.error_deadband_rad < 0.0f || config.sat_boundary <= 0.0f) {
+    if (!AllConfigFloatsFinite(config) || !std::isfinite(j_kg_m2) ||
+        j_kg_m2 <= MIN_J_KG_M2 || config.c <= 0.0f || config.k < 0.0f ||
+        config.epsilon < 0.0f || config.error_deadband_rad < 0.0f ||
+        config.sat_boundary <= 0.0f) {
       return false;
     }
     if (config.ftsmc_enable &&
@@ -83,13 +118,14 @@ class YawSmc final {
     UNUSED(omega_rad_s);
     last_applied_torque_nm_ = previous_applied_torque_nm;
     slew_anchor_torque_nm_ = previous_applied_torque_nm;
-    previous_torque_slew_enable_ = false;
+    slew_primed_ = false;
   }
 
-  Output Calculate(const Config& config, const Reference& reference,
-                   const Feedback& feedback, float dt_s) {
+  [[nodiscard]] Output Calculate(const Reference& reference,
+                                 const Feedback& feedback, float dt_s,
+                                 float j_kg_m2) {
     Output output{};
-    if (!ValidateConfig(config) || !feedback.valid ||
+    if (!ValidateConfig(config_, j_kg_m2) || !feedback.valid ||
         !std::isfinite(reference.theta_rad) ||
         !std::isfinite(reference.omega_rad_s) ||
         !std::isfinite(reference.alpha_rad_s2) ||
@@ -109,40 +145,40 @@ class YawSmc final {
       return {};
     }
 
-    if (std::fabs(output.e_theta_rad) < config.error_deadband_rad) {
-      if (config.torque_slew_enable && !previous_torque_slew_enable_) {
+    if (std::fabs(output.e_theta_rad) < config_.error_deadband_rad) {
+      if (config_.torque_slew_enable && !slew_primed_) {
         slew_anchor_torque_nm_ = last_applied_torque_nm_;
       }
-      previous_torque_slew_enable_ = config.torque_slew_enable;
+      slew_primed_ = true;
       output.valid = true;
       return output;
     }
 
-    output.tau_ff_alpha_nm = config.j_kg_m2 * reference.alpha_rad_s2;
+    output.tau_ff_alpha_nm = j_kg_m2 * reference.alpha_rad_s2;
 
     const float ABS_E_THETA_RAD = std::fabs(output.e_theta_rad);
     // 误差达到配置边界时使用 FTSMC，小于边界时使用线性 SMC。
     const bool USE_FTSMC =
-        config.ftsmc_enable && ABS_E_THETA_RAD >= config.ftsmc_switch_rad;
+        config_.ftsmc_enable && ABS_E_THETA_RAD >= config_.ftsmc_switch_rad;
     output.used_ftsmc = USE_FTSMC;
 
     float surface_dot_term = 0.0f;
     if (USE_FTSMC) {
-      const float R = config.q / config.p;
+      const float R = config_.q / config_.p;
       output.s =
-          output.e_omega_rad_s + config.c * SigPow(output.e_theta_rad, R);
+          output.e_omega_rad_s + config_.c * SigPow(output.e_theta_rad, R);
       // d(sig^r(e))/dt = r * |e|^(r-1) * e_dot，不含 sign(e)。
-      surface_dot_term = config.c * R * std::pow(ABS_E_THETA_RAD, R - 1.0f) *
+      surface_dot_term = config_.c * R * std::pow(ABS_E_THETA_RAD, R - 1.0f) *
                          output.e_omega_rad_s;
     } else {
-      output.s = output.e_omega_rad_s + config.c * output.e_theta_rad;
-      surface_dot_term = config.c * output.e_omega_rad_s;
+      output.s = output.e_omega_rad_s + config_.c * output.e_theta_rad;
+      surface_dot_term = config_.c * output.e_omega_rad_s;
     }
 
-    output.sat_s = Sat(output.s / config.sat_boundary);
+    output.sat_s = Sat(output.s / config_.sat_boundary);
     output.tau_smc_nm =
-        config.j_kg_m2 * (-surface_dot_term - config.epsilon * output.sat_s -
-                          config.k * output.s);
+        j_kg_m2 * (-surface_dot_term - config_.epsilon * output.sat_s -
+                   config_.k * output.s);
     output.tau_pre_limit_nm = output.tau_ff_alpha_nm + output.tau_smc_nm;
 
     if (!BaseOutputIsFinite(output)) {
@@ -150,19 +186,20 @@ class YawSmc final {
     }
 
     float constrained_torque_nm = output.tau_pre_limit_nm;
-    if (config.torque_soft_limit_nm > 0.0f) {
+    if (config_.torque_soft_limit_nm > 0.0f) {
       const float SOFT_LIMITED_TORQUE_NM =
-          Clamp(constrained_torque_nm, -config.torque_soft_limit_nm,
-                config.torque_soft_limit_nm);
+          Clamp(constrained_torque_nm, -config_.torque_soft_limit_nm,
+                config_.torque_soft_limit_nm);
       output.soft_limit_active =
           SOFT_LIMITED_TORQUE_NM != constrained_torque_nm;
       constrained_torque_nm = SOFT_LIMITED_TORQUE_NM;
     }
 
-    const bool HARD_LIMIT_ENABLED = config.torque_min_nm < config.torque_max_nm;
+    const bool HARD_LIMIT_ENABLED =
+        config_.torque_min_nm < config_.torque_max_nm;
     if (HARD_LIMIT_ENABLED) {
       const float HARD_LIMITED_TORQUE_NM = Clamp(
-          constrained_torque_nm, config.torque_min_nm, config.torque_max_nm);
+          constrained_torque_nm, config_.torque_min_nm, config_.torque_max_nm);
       output.hard_limit_active =
           HARD_LIMITED_TORQUE_NM != constrained_torque_nm;
       constrained_torque_nm = HARD_LIMITED_TORQUE_NM;
@@ -171,30 +208,30 @@ class YawSmc final {
     output.tau_cmd_nm = output.tau_cmd_before_slew_nm;
 
     float next_slew_anchor_torque_nm = slew_anchor_torque_nm_;
-    if (config.torque_slew_enable) {
-      if (!previous_torque_slew_enable_) {
+    if (config_.torque_slew_enable) {
+      if (!slew_primed_) {
         next_slew_anchor_torque_nm = last_applied_torque_nm_;
       }
 
       bool limit_intersection_enabled = false;
       float limit_intersection_min_nm = 0.0f;
       float limit_intersection_max_nm = 0.0f;
-      if (config.torque_soft_limit_nm > 0.0f) {
-        limit_intersection_min_nm = -config.torque_soft_limit_nm;
-        limit_intersection_max_nm = config.torque_soft_limit_nm;
+      if (config_.torque_soft_limit_nm > 0.0f) {
+        limit_intersection_min_nm = -config_.torque_soft_limit_nm;
+        limit_intersection_max_nm = config_.torque_soft_limit_nm;
         limit_intersection_enabled = true;
       }
       if (HARD_LIMIT_ENABLED) {
         if (!limit_intersection_enabled) {
-          limit_intersection_min_nm = config.torque_min_nm;
-          limit_intersection_max_nm = config.torque_max_nm;
+          limit_intersection_min_nm = config_.torque_min_nm;
+          limit_intersection_max_nm = config_.torque_max_nm;
           limit_intersection_enabled = true;
         } else {
-          if (config.torque_min_nm > limit_intersection_min_nm) {
-            limit_intersection_min_nm = config.torque_min_nm;
+          if (config_.torque_min_nm > limit_intersection_min_nm) {
+            limit_intersection_min_nm = config_.torque_min_nm;
           }
-          if (config.torque_max_nm < limit_intersection_max_nm) {
-            limit_intersection_max_nm = config.torque_max_nm;
+          if (config_.torque_max_nm < limit_intersection_max_nm) {
+            limit_intersection_max_nm = config_.torque_max_nm;
           }
         }
       }
@@ -208,7 +245,8 @@ class YawSmc final {
         next_slew_anchor_torque_nm = output.tau_cmd_before_slew_nm;
       }
 
-      const float MAXIMUM_TORQUE_DELTA_NM = config.torque_slew_rate_nm_s * dt_s;
+      const float MAXIMUM_TORQUE_DELTA_NM =
+          config_.torque_slew_rate_nm_s * dt_s;
       const float SLEW_MIN_NM =
           next_slew_anchor_torque_nm - MAXIMUM_TORQUE_DELTA_NM;
       const float SLEW_MAX_NM =
@@ -227,10 +265,10 @@ class YawSmc final {
       return {};
     }
 
-    if (config.torque_slew_enable && !previous_torque_slew_enable_) {
+    if (config_.torque_slew_enable && !slew_primed_) {
       slew_anchor_torque_nm_ = last_applied_torque_nm_;
     }
-    previous_torque_slew_enable_ = config.torque_slew_enable;
+    slew_primed_ = true;
     output.valid = true;
     return output;
   }
@@ -240,12 +278,15 @@ class YawSmc final {
       return;
     }
     last_applied_torque_nm_ = applied_torque_nm;
-    if (previous_torque_slew_enable_) {
+    // 配置锁存后 slew 是否启用是常量，故只需判「Calculate 是否已跑过一周期」。
+    if (slew_primed_ && config_.torque_slew_enable) {
       slew_anchor_torque_nm_ = applied_torque_nm;
     }
   }
 
  private:
+  const Config config_;  ///< 构造期锁存，运行期只读（对齐 LibXR::PID::param_）
+
   static constexpr float MIN_J_KG_M2 = 1e-6f;
   static constexpr float MIN_DT_S = 0.0005f;
   static constexpr float MAX_DT_S = 0.02f;
@@ -286,9 +327,9 @@ class YawSmc final {
   }
 
   static bool AllConfigFloatsFinite(const Config& config) {
-    return std::isfinite(config.j_kg_m2) && std::isfinite(config.c) &&
-           std::isfinite(config.k) && std::isfinite(config.epsilon) &&
-           std::isfinite(config.q) && std::isfinite(config.p) &&
+    return std::isfinite(config.c) && std::isfinite(config.k) &&
+           std::isfinite(config.epsilon) && std::isfinite(config.q) &&
+           std::isfinite(config.p) &&
            std::isfinite(config.error_deadband_rad) &&
            std::isfinite(config.ftsmc_switch_rad) &&
            std::isfinite(config.sat_boundary) &&
@@ -300,5 +341,5 @@ class YawSmc final {
 
   float last_applied_torque_nm_{};
   float slew_anchor_torque_nm_{};
-  bool previous_torque_slew_enable_{};
+  bool slew_primed_{};  ///< 首周期 slew anchor 播种标志
 };
