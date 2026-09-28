@@ -85,6 +85,48 @@ SMC_EXPECTED_DEFAULTS = {
     "torque_slew_enable": True,
 }
 
+# SystemIdentify::Config（SystemIdentify.hpp）字段序与默认值守护。
+# 尾部 float 连排字段是位置展开的静默错绑高危区，三处（C++/manifest/yaml）必须一致。
+SYSID_EXPECTED_FIELDS = (
+    "enabled",
+    "axis_select",
+    "arming_delay_s",
+    "step_torque_yaw_nm",
+    "step_torque_pit_nm",
+    "step_half_period_s",
+    "step_cycles",
+    "settle_time_s",
+    "lpf_cutoff_hz",
+    "alpha_gate_rad_s2",
+    "rls_delta",
+    "rls_lambda",
+    "coulomb_tanh_scale",
+    "omega_abort_yaw",
+    "omega_abort_pit",
+    "pit_angle_margin_rad",
+    "axis_timeout_s",
+)
+
+SYSID_EXPECTED_DEFAULTS = {
+    "enabled": False,
+    "axis_select": "IdentifyAxis::BOTH",
+    "arming_delay_s": 3.0,
+    "step_torque_yaw_nm": 0.5,
+    "step_torque_pit_nm": 0.2,
+    "step_half_period_s": 0.5,
+    "step_cycles": 10,
+    "settle_time_s": 1.0,
+    "lpf_cutoff_hz": 50.0,
+    "alpha_gate_rad_s2": 1.0,
+    "rls_delta": 1000.0,
+    "rls_lambda": 1.0,
+    "coulomb_tanh_scale": 0.1,
+    "omega_abort_yaw": 8.0,
+    "omega_abort_pit": 4.0,
+    "pit_angle_margin_rad": 0.1,
+    "axis_timeout_s": 30.0,
+}
+
 EXPECTED_DEFAULTS = {
     "k_theta": 1.0,
     "k_omega": 1.0,
@@ -116,6 +158,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--header", default=MODULE_ROOT / "Gimbal.hpp")
 parser.add_argument("--algorithm", default=MODULE_ROOT / "YawLqrEso.hpp")
 parser.add_argument("--smc-algorithm", default=MODULE_ROOT / "YawSmc.hpp")
+parser.add_argument("--sysid-algorithm", default=MODULE_ROOT / "SystemIdentify.hpp")
 parser.add_argument(
     "--config", default=ROOT / "User/RobotConfig/sentry_gimbal.yaml"
 )
@@ -132,7 +175,9 @@ def config_fields(source, struct_name):
     if block is None:
         raise SystemExit(f"{struct_name} struct not found")
     fields = []
-    for declaration in re.finditer(r"\b(?:float|bool)\s+([^;]+);", block.group(1)):
+    for declaration in re.finditer(
+        r"\b(?:float|bool|uint32_t|IdentifyAxis)\s+([^;]+);", block.group(1)
+    ):
         for item in declaration.group(1).split(","):
             name = re.search(r"([a-z][a-z0-9_]*)", item.strip())
             if name:
@@ -170,7 +215,8 @@ def config_defaults(source, struct_name):
         raise SystemExit(f"{struct_name} struct not found")
     defaults = {}
     for declaration in re.finditer(
-        r"\b(?:float|bool)\s+([a-z][a-z0-9_]*)\s*\{([^}]*)\}", block.group(1)
+        r"\b(?:float|bool|uint32_t|IdentifyAxis)\s+([a-z][a-z0-9_]*)\s*\{([^}]*)\}",
+        block.group(1),
     ):
         name, literal = declaration.group(1), declaration.group(2).strip()
         if literal == "":
@@ -179,6 +225,10 @@ def config_defaults(source, struct_name):
             defaults[name] = literal.rstrip("fF") == "true"
         elif literal in CANONICAL_EXPRESSIONS:
             defaults[name] = f32(CANONICAL_EXPRESSIONS[literal])
+        elif "::" in literal:
+            defaults[name] = literal  # 枚举默认值按原样字符串比对
+        elif re.fullmatch(r"[0-9]+", literal):
+            defaults[name] = int(literal)  # uint32_t 默认值
         else:
             defaults[name] = f32(literal.rstrip("fF"))
     return defaults
@@ -252,8 +302,9 @@ expected_tail = [
     "gimbal_param",
     "yaw_lqr_eso",
     "yaw_smc",
+    "system_identify",
 ]
-if manifest_names[-3:] != expected_tail:
+if manifest_names[-4:] != expected_tail:
     raise SystemExit("manifest constructor order mismatch")
 if "ai_yaw_lqr_eso_enable" in manifest_names:
     raise SystemExit("removed route master remains in manifest")
@@ -281,6 +332,13 @@ for key, expected_value in SMC_EXPECTED_DEFAULTS.items():
     actual_value = smc_manifest[key]
     if type(actual_value) is not type(expected_value) or actual_value != expected_value:
         raise SystemExit(f"SMC manifest default mismatch: {key}")
+sysid_manifest = mapping_from_manifest(manifest_args, "system_identify")
+if tuple(sysid_manifest.keys()) != SYSID_EXPECTED_FIELDS:
+    raise SystemExit("SYSID manifest order mismatch")
+for key, expected_value in SYSID_EXPECTED_DEFAULTS.items():
+    actual_value = sysid_manifest[key]
+    if type(actual_value) is not type(expected_value) or actual_value != expected_value:
+        raise SystemExit(f"SYSID manifest default mismatch: {key}")
 
 # C++ 结构体默认值必须逐字段等于 manifest 默认值：两者分叉会让"省略键就用默认值"
 # 这件事失真（曾经 C++ 侧全零、manifest 侧是正增益，全零配置能通过校验 → 静默零增益）。
@@ -293,6 +351,14 @@ check_cpp_defaults(
     config_defaults(pathlib.Path(args.smc_algorithm).read_text(), "Config"),
     SMC_EXPECTED_DEFAULTS,
     "SMC",
+)
+sysid_fields = config_fields(pathlib.Path(args.sysid_algorithm).read_text(), "Config")
+if sysid_fields != SYSID_EXPECTED_FIELDS:
+    raise SystemExit("SYSID Config order mismatch")
+check_cpp_defaults(
+    config_defaults(pathlib.Path(args.sysid_algorithm).read_text(), "Config"),
+    SYSID_EXPECTED_DEFAULTS,
+    "SYSID",
 )
 
 if not args.header_only:
@@ -324,6 +390,11 @@ if not args.header_only:
     smc_yaml = gimbal_args["yaw_smc"]
     if tuple(smc_yaml.keys()) != SMC_EXPECTED_FIELDS:
         raise SystemExit("SMC YAML order mismatch")
+    sysid_yaml = gimbal_args["system_identify"]
+    if tuple(sysid_yaml.keys()) != SYSID_EXPECTED_FIELDS:
+        raise SystemExit("SYSID YAML order mismatch")
+    if sysid_yaml.get("enabled") is not False:
+        raise SystemExit("sentry gimbal YAML must keep system_identify disabled")
     if args.generated:
 
         def cpp(value):
@@ -335,6 +406,11 @@ if not args.header_only:
         smc_expected = (
             "{" + ",".join(cpp(smc_yaml[key]) for key in SMC_EXPECTED_FIELDS) + "}"
         )
+        sysid_expected = (
+            "{"
+            + ",".join(cpp(sysid_yaml[key]) for key in SYSID_EXPECTED_FIELDS)
+            + "}"
+        )
         generated = re.sub(r"\s+", "", pathlib.Path(args.generated).read_text())
         if expected not in generated:
             raise SystemExit("generated aggregate and Topic suffix mismatch")
@@ -344,5 +420,7 @@ if not args.header_only:
             raise SystemExit("generated AI controller enum mismatch")
         if smc_expected not in generated:
             raise SystemExit("generated SMC aggregate mismatch")
+        if sysid_expected not in generated:
+            raise SystemExit("generated SYSID aggregate mismatch")
 
 print("PASS: Gimbal config order regression")

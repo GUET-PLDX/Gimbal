@@ -97,6 +97,24 @@ constructor_args:
       torque_slew_rate_nm_s: 1000.0
       ftsmc_enable: true
       torque_slew_enable: true
+  - system_identify:
+      enabled: false
+      axis_select: IdentifyAxis::BOTH
+      arming_delay_s: 3.0
+      step_torque_yaw_nm: 0.5
+      step_torque_pit_nm: 0.2
+      step_half_period_s: 0.5
+      step_cycles: 10
+      settle_time_s: 1.0
+      lpf_cutoff_hz: 50.0
+      alpha_gate_rad_s2: 1.0
+      rls_delta: 1000.0
+      rls_lambda: 1.0
+      coulomb_tanh_scale: 0.1
+      omega_abort_yaw: 8.0
+      omega_abort_pit: 4.0
+      pit_angle_margin_rad: 0.1
+      axis_timeout_s: 30.0
 template_args: []
 required_hardware: []
 depends:
@@ -113,6 +131,7 @@ depends:
 #include "CMD.hpp"
 #include "DualBoard.hpp"
 #include "Motor.hpp"
+#include "SystemIdentify.hpp"
 #include "YawLqrEso.hpp"
 #include "YawSmc.hpp"
 #include "app_framework.hpp"
@@ -137,7 +156,8 @@ enum class GimbalEvent : uint8_t {
   SET_VISION_IDLE,
   SET_VISION_AUTO_AIM,
   SET_VISION_SMALL_BUFF,
-  SET_VISION_BIG_BUFF
+  SET_VISION_BIG_BUFF,
+  SET_MODE_IDENTIFY
 };
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_RELAX) == 0U);
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_COMMON) == 1U);
@@ -146,6 +166,7 @@ static_assert(static_cast<uint8_t>(GimbalEvent::SET_VISION_IDLE) == 3U);
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_VISION_AUTO_AIM) == 4U);
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_VISION_SMALL_BUFF) == 5U);
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_VISION_BIG_BUFF) == 6U);
+static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_IDENTIFY) == 7U);
 enum class YawManualController : uint8_t { PID, SMC };
 enum class YawAiController : uint8_t { LQR_ESO, SMC };
 class Gimbal : public LibXR::Application {
@@ -213,9 +234,11 @@ class Gimbal : public LibXR::Application {
    * @param yaw_ai_controller AI Yaw 控制器选择，LQR/ESO 或 SMC
    * @param yaw_lqr_eso AI Yaw LQR/ESO参数
    * @param yaw_smc Yaw 滑模参数
+   * @param system_identify 系统辨识配置（一次性标定工具，enabled
+   * 时上电进入辨识）
    *
-   * @note `yaw_lqr_eso` / `yaw_smc` **故意不给默认实参**。`xrobot_gen_main`
-   * 按位置 展开 `constructor_args`，YAML
+   * @note `yaw_lqr_eso` / `yaw_smc` / `system_identify` **故意不给默认实参**。
+   * `xrobot_gen_main` 按位置 展开 `constructor_args`，YAML
    * 里漏掉某个键时它会**直接丢弃该实参而不是 回退到 manifest
    * 默认值**，于是其后所有实参整体左移（实测：省掉 `yaw_lqr_eso` 会把 `yaw_smc`
    * 的聚合值喂给 `yaw_lqr_eso`，而 `yaw_smc`
@@ -228,7 +251,8 @@ class Gimbal : public LibXR::Application {
          LibXR::PID<float>::Param pid_pit_angle,
          LibXR::PID<float>::Param pid_pit_omega, Motor* motor_pit,
          Motor* motor_yaw, GimbalParam gimbal_param,
-         YawLqrEso::Config yaw_lqr_eso, YawSmc::Config yaw_smc)
+         YawLqrEso::Config yaw_lqr_eso, YawSmc::Config yaw_smc,
+         SystemIdentify::Config system_identify)
       : cmd_(cmd),
         pid_yaw_angle_(pid_yaw_angle),
         pid_yaw_omega_(pid_yaw_omega),
@@ -240,7 +264,8 @@ class Gimbal : public LibXR::Application {
         yaw_lqr_eso_(
             CheckedLqrEsoConfig(std::move(yaw_lqr_eso), gimbal_param.j_yaw,
                                 pid_yaw_omega_.OutLimit(), gimbal_param.yaw_k)),
-        yaw_smc_(CheckedSmcConfig(std::move(yaw_smc), gimbal_param.j_yaw)) {
+        yaw_smc_(CheckedSmcConfig(std::move(yaw_smc), gimbal_param.j_yaw)),
+        system_identify_(CheckedSysIdConfig(std::move(system_identify))) {
     UNUSED(app);
     InitializeTopics();
     ChassisMotionStateTopic();
@@ -275,6 +300,8 @@ class Gimbal : public LibXR::Application {
         static_cast<uint32_t>(GimbalEvent::SET_VISION_SMALL_BUFF), callback);
     gimbal_event_.Register(
         static_cast<uint32_t>(GimbalEvent::SET_VISION_BIG_BUFF), callback);
+    gimbal_event_.Register(
+        static_cast<uint32_t>(GimbalEvent::SET_MODE_IDENTIFY), callback);
   };
 
   /**
@@ -331,6 +358,15 @@ class Gimbal : public LibXR::Application {
    * @brief 更新电机反馈及状态
    */
   void Update() {
+    // 上电一次性钩子：system_identify.enabled 时自动进入辨识模式。
+    // 辨识完成后锁死 RELAX（见 SetMode），须以 enabled:false 重启恢复正常使用。
+    if (!identify_boot_checked_) {
+      identify_boot_checked_ = true;
+      if (system_identify_.GetConfig().enabled &&
+          current_mode_ == GimbalEvent::SET_MODE_RELAX) {
+        SetMode(GimbalEvent::SET_MODE_IDENTIFY);
+      }
+    }
     motor_yaw_->Update();
     motor_pit_->Update();
     motor_yaw_feedback_ = motor_yaw_->GetFeedback();
@@ -418,6 +454,11 @@ class Gimbal : public LibXR::Application {
       return;
     }
 
+    if (current_mode_ == GimbalEvent::SET_MODE_IDENTIFY) {
+      ControlIdentify();
+      return;
+    }
+
     CycleFeedforward command = feedforward;
     PitchLimit(command.pitch_angle, euler_.Pitch(),
                motor_pit_feedback_.abs_angle, PARAM.pit_max_angle,
@@ -490,6 +531,9 @@ class Gimbal : public LibXR::Application {
   LibXR::MicrosecondTimestamp last_online_time_;
   YawLqrEso yaw_lqr_eso_;
   YawSmc yaw_smc_;
+  SystemIdentify system_identify_;
+  bool identify_boot_checked_ = false;
+  bool identify_relax_lock_ = false;
   ChassisMotionState chassis_motion_state_{};
   LibXR::Thread thread_;
 
@@ -514,6 +558,13 @@ class Gimbal : public LibXR::Application {
   /// @brief 校验并透传 Yaw 滑模配置；非法配置在构造期直接挂起。
   static YawSmc::Config CheckedSmcConfig(YawSmc::Config config, float j_kg_m2) {
     REQUIRE(YawSmc::ValidateConfig(config, j_kg_m2));
+    return config;
+  }
+
+  /// @brief 校验并透传系统辨识配置；非法配置在构造期直接挂起。
+  static SystemIdentify::Config CheckedSysIdConfig(
+      SystemIdentify::Config config) {
+    REQUIRE(SystemIdentify::ValidateConfig(config));
     return config;
   }
 
@@ -553,6 +604,60 @@ class Gimbal : public LibXR::Application {
     pid_yaw_omega_.SetFeedForward(0.0f);
     motor_yaw_->Relax();
     motor_pit_->Relax();
+  }
+
+  /**
+   * @brief 系统辨识模式控制输出（开环力矩双向阶跃 + RLS 在线辨识 J/B）。
+   *
+   * 生效轴输出激励力矩，非生效轴 Relax；pitch 角度限值取 GimbalParam
+   * 机械限位内缩 `pit_angle_margin_rad` 安全边距，越界立即中止。
+   * DONE/ABORTED 后锁死 RELAX（`identify_relax_lock_`），直到以
+   * `system_identify.enabled: false` 重启。
+   */
+  void ControlIdentify() {
+    if (system_identify_.GetActiveAxis() == SystemIdentify::ActiveAxis::PITCH) {
+      const float MARGIN = system_identify_.GetConfig().pit_angle_margin_rad;
+      const float PIT_ANGLE = motor_pit_feedback_.abs_angle;
+      if (PIT_ANGLE < PARAM.pit_min_angle + MARGIN ||
+          PIT_ANGLE > PARAM.pit_max_angle - MARGIN) {
+        system_identify_.Abort(IdentifyAbort::PITCH_ANGLE_LIMIT);
+      }
+    }
+
+    const SystemIdentify::Sensors SENSORS{
+        .yaw_omega_rad_s = gyro_data_.z(),
+        .pit_omega_rad_s = gyro_data_.y(),
+        .pit_theta_rad = euler_.Pitch(),
+        .yaw_motor_online = motor_yaw_->IsOnline(),
+        .pit_motor_online = motor_pit_->IsOnline(),
+        .rc_online = cmd_.Online(),
+    };
+    const float TAU = system_identify_.Update(SENSORS, dt_);
+    const auto ACTIVE = system_identify_.GetActiveAxis();
+
+    if (ACTIVE == SystemIdentify::ActiveAxis::YAW) {
+      motor_pit_->Relax();
+      ControlYawMotor(Motor::MotorCmd(
+          {.mode = Motor::ControlMode::MODE_TORQUE, .torque = TAU}));
+    } else if (ACTIVE == SystemIdentify::ActiveAxis::PITCH) {
+      motor_yaw_->Relax();
+      if (motor_pit_feedback_.state == 0) {
+        motor_pit_->Enable();
+      } else if (motor_pit_feedback_.state != 1) {
+        motor_pit_->ClearError();
+      } else {
+        motor_pit_->Control(Motor::MotorCmd(
+            {.mode = Motor::ControlMode::MODE_TORQUE, .torque = TAU}));
+      }
+    } else {
+      SubmitRelaxOutput();
+    }
+
+    if (system_identify_.State() == IdentifyState::DONE ||
+        system_identify_.State() == IdentifyState::ABORTED) {
+      identify_relax_lock_ = true;
+      SetMode(GimbalEvent::SET_MODE_RELAX);
+    }
   }
 
   void ControlYawMotor(const Motor::MotorCmd& command) {
@@ -743,6 +848,20 @@ class Gimbal : public LibXR::Application {
    * @param gimbal_event 云台事件类型
    */
   void SetMode(GimbalEvent gimbal_event) {
+    // 辨识 DONE/ABORTED 后锁死 RELAX：忽略一切非 RELAX 模式请求，
+    // 直到以 system_identify.enabled: false 重启。
+    if (identify_relax_lock_ && gimbal_event != GimbalEvent::SET_MODE_RELAX) {
+      return;
+    }
+    // 辨识进行中收到任何外部模式事件（含 lost ctrl 强制的
+    // RELAX）= 操作手中止：锁存已收敛轴结果，强制回 RELAX 并上锁。
+    if (current_mode_ == GimbalEvent::SET_MODE_IDENTIFY &&
+        gimbal_event != GimbalEvent::SET_MODE_IDENTIFY &&
+        system_identify_.IsActive()) {
+      system_identify_.Abort(IdentifyAbort::EXTERNAL_EVENT);
+      identify_relax_lock_ = true;
+      gimbal_event = GimbalEvent::SET_MODE_RELAX;
+    }
     if (gimbal_event == current_mode_) {
       return;
     }
@@ -824,6 +943,16 @@ class Gimbal : public LibXR::Application {
         patrol_ = {.pitch_center_rad = euler_.Pitch(),
                    .yaw_origin_rad = euler_.Yaw(),
                    .start_time = LibXR::Timebase::GetMilliseconds()};
+        break;
+      case GimbalEvent::SET_MODE_IDENTIFY:
+        PublishVisionTask(0U);
+        pid_pit_omega_.SetFeedForward(0.0f);
+        pid_yaw_omega_.SetFeedForward(0.0f);
+        pid_pit_angle_.Reset();
+        pid_pit_omega_.Reset();
+        pid_yaw_angle_.Reset();
+        pid_yaw_omega_.Reset();
+        system_identify_.Begin();
         break;
       default:
         break;
