@@ -179,6 +179,125 @@ int Run() {
         result.j, result.b, result.tau_c, result.mgl, result.residual_ratio);
   }
 
+  // ---- 故障注入：dt 毛刺不得污染估计 ----
+  // 调度追赶导致 dt 远小于 1ms 时，alpha=差分/dt 会爆炸（实车残余溢出 inf
+  // 的根因之一）。MIN_DT_S 钳制后结果必须保持在容差内。
+  {
+    const Truth TRUTH{0.04373488, 0.02, 0.03, 0.0};
+    SystemIdentify::Config config = MakeConfig(IdentifyAxis::YAW_ONLY);
+    SystemIdentify sysid(config);
+    sysid.Begin();
+    Plant plant{TRUTH.j, TRUTH.b, TRUTH.tau_c, TRUTH.mgl};
+    SystemIdentify::Sensors sensors{};
+    sensors.rc_online = true;
+    sensors.yaw_motor_online = true;
+    sensors.pit_motor_online = true;
+    bool finished = false;
+    for (uint32_t step = 0; step < 120000 && !finished; step++) {
+      sensors.yaw_omega_rad_s = static_cast<float>(plant.omega);
+      sensors.pit_omega_rad_s = static_cast<float>(plant.omega);
+      sensors.pit_theta_rad = static_cast<float>(plant.theta);
+      // 第 2000/2001/5000 步注入 dt 毛刺
+      const float DT = (step == 2000 || step == 2001 || step == 5000)
+                           ? 1e-6f
+                           : static_cast<float>(DT_S);
+      const float TAU = sysid.Update(sensors, DT);
+      plant.Step(TAU, false);
+      finished = sysid.State() == IdentifyState::DONE ||
+                 sysid.State() == IdentifyState::ABORTED;
+    }
+    if (sysid.State() != IdentifyState::DONE) {
+      std::printf("FAIL: dt-spike run did not reach DONE\n");
+      ok = false;
+    } else {
+      ok &= CheckTruth(sysid.YawResult(), TRUTH, 0.05, false);
+      std::printf("yaw dt-spike:  J=%.6f B=%.5f tau_c=%.5f ratio=%.4f\n",
+                  sysid.YawResult().j, sysid.YawResult().b,
+                  sysid.YawResult().tau_c, sysid.YawResult().residual_ratio);
+    }
+  }
+
+  // ---- 故障注入：陀螺野值（大幅值 + NaN）不得发散 ----
+  {
+    const Truth TRUTH{0.04373488, 0.02, 0.03, 0.0};
+    SystemIdentify::Config config = MakeConfig(IdentifyAxis::YAW_ONLY);
+    SystemIdentify sysid(config);
+    sysid.Begin();
+    Plant plant{TRUTH.j, TRUTH.b, TRUTH.tau_c, TRUTH.mgl};
+    SystemIdentify::Sensors sensors{};
+    sensors.rc_online = true;
+    sensors.yaw_motor_online = true;
+    sensors.pit_motor_online = true;
+    bool finished = false;
+    for (uint32_t step = 0; step < 120000 && !finished; step++) {
+      float measured = static_cast<float>(plant.omega);
+      if (step == 3000) {
+        measured = 1e4f;  // 大幅值毛刺（被 omega_abort 拦截）
+      } else if (step == 3001) {
+        measured = 0.0f;  // 毛刺后恢复正常
+      }
+      if (step == 6000) {
+        measured = 0.0f / 0.0f;  // NaN 毛刺（被有限性检查拦截）
+      }
+      sensors.yaw_omega_rad_s = measured;
+      sensors.pit_omega_rad_s = static_cast<float>(plant.omega);
+      sensors.pit_theta_rad = static_cast<float>(plant.theta);
+      const float TAU = sysid.Update(sensors, static_cast<float>(DT_S));
+      plant.Step(TAU, false);
+      finished = sysid.State() == IdentifyState::DONE ||
+                 sysid.State() == IdentifyState::ABORTED;
+    }
+    // 大幅值毛刺会触发 OMEGA_LIMIT 中止——属预期防线；此处验证的是
+    // "不发散、不锁存垃圾"：若中止则结果不得 converged，若完成则须在容差内。
+    if (sysid.State() == IdentifyState::ABORTED) {
+      if (sysid.AbortReason() != IdentifyAbort::OMEGA_LIMIT &&
+          sysid.AbortReason() != IdentifyAbort::NUMERICAL_DIVERGENCE) {
+        std::printf("FAIL: gyro-glitch abort reason=%d unexpected\n",
+                    static_cast<int>(sysid.AbortReason()));
+        ok = false;
+      }
+      if (sysid.YawResult().converged) {
+        std::printf("FAIL: gyro-glitch run latched garbage as converged\n");
+        ok = false;
+      }
+    } else {
+      ok &= CheckTruth(sysid.YawResult(), TRUTH, 0.10, false);
+    }
+    std::printf("yaw gyro-glitch: state=%d converged=%d\n",
+                static_cast<int>(sysid.State()),
+                static_cast<int>(sysid.YawResult().converged));
+  }
+
+  // ---- 故障注入：力矩符号反转必须判不收敛（不得锁存垃圾） ----
+  {
+    SystemIdentify::Config config = MakeConfig(IdentifyAxis::YAW_ONLY);
+    SystemIdentify sysid(config);
+    sysid.Begin();
+    Plant plant{0.04373488, 0.02, 0.03, 0.0};
+    SystemIdentify::Sensors sensors{};
+    sensors.rc_online = true;
+    sensors.yaw_motor_online = true;
+    sensors.pit_motor_online = true;
+    bool finished = false;
+    for (uint32_t step = 0; step < 120000 && !finished; step++) {
+      sensors.yaw_omega_rad_s = static_cast<float>(plant.omega);
+      sensors.pit_omega_rad_s = static_cast<float>(plant.omega);
+      sensors.pit_theta_rad = static_cast<float>(plant.theta);
+      const float TAU = sysid.Update(sensors, static_cast<float>(DT_S));
+      plant.Step(-TAU, false);  // 实际力矩与指令反号
+      finished = sysid.State() == IdentifyState::DONE ||
+                 sysid.State() == IdentifyState::ABORTED;
+    }
+    if (sysid.State() == IdentifyState::DONE && sysid.YawResult().converged) {
+      std::printf("FAIL: sign-flipped plant must not report converged\n");
+      ok = false;
+    }
+    std::printf("yaw sign-flip:   state=%d converged=%d ratio=%.3g\n",
+                static_cast<int>(sysid.State()),
+                static_cast<int>(sysid.YawResult().converged),
+                sysid.YawResult().residual_ratio);
+  }
+
   // ---- 中止路径：电机离线必须触发 MOTOR_OFFLINE ----
   {
     SystemIdentify sysid(MakeConfig(IdentifyAxis::YAW_ONLY));

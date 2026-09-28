@@ -146,16 +146,29 @@ need_set_mode_count 'current_mode_ = gimbal_event;' 1 \
 need_set_mode_before 'if \(gimbal_event == current_mode_\)' \
   'pid_pit_omega_\.SetFeedForward\(0\.0f\)' \
   'same-mode return precedes feedforward and history cleanup'
+# SystemIdentify：ARMING 期放行 RELAX 拨杆位置事件（EventBinder 电平映射
+# 在 RC 上线/复联首帧补发，安全默认位置非操作手接管意图）；放行分支必须
+# 先于 EXTERNAL_EVENT 中止分支——顺序颠倒则放行成死代码，原始失效模式
+# （RC 上线首帧 RELAX 事件中止 ARMING）即复现。
+need_set_mode \
+  'gimbal_event == GimbalEvent::SET_MODE_RELAX &&\s*system_identify_\.State\(\) == IdentifyState::ARMING' \
+  'ARMING-stage RELAX switch-position events are ignored, not an operator abort'
+need_set_mode \
+  'system_identify_\.Abort\(IdentifyAbort::EXTERNAL_EVENT\)' \
+  'external mode events during excite/settle still abort identification'
+need_set_mode_before 'State\(\) == IdentifyState::ARMING' \
+  'Abort\(IdentifyAbort::EXTERNAL_EVENT\)' \
+  'ARMING RELAX pass-through precedes the operator-abort branch'
 forbid \
   'SET_MODE_LOW_SENSITIVITY|ApplyOperatorGimbalSensitivity|SetOperatorGimbalSensitivity' \
   'removed low-sensitivity mode and its operator sensitivity hook'
-need_set_mode_count 'pid_pit_omega_\.SetFeedForward\(0\.0f\)' 7 \
+need_set_mode_count 'pid_pit_omega_\.SetFeedForward\(0\.0f\)' 8 \
   'Pitch feedforward cleanup is shared'
-need_set_mode_count 'pid_yaw_omega_\.SetFeedForward\(0\.0f\)' 7 \
+need_set_mode_count 'pid_yaw_omega_\.SetFeedForward\(0\.0f\)' 8 \
   'Yaw feedforward cleanup is shared'
-need_set_mode_count 'pid_pit_angle_\.Reset\(\)' 7 \
+need_set_mode_count 'pid_pit_angle_\.Reset\(\)' 8 \
   'Pitch angle PID reset clears LastOutput'
-need_set_mode_count 'pid_yaw_angle_\.Reset\(\)' 7 \
+need_set_mode_count 'pid_yaw_angle_\.Reset\(\)' 8 \
   'Yaw angle PID reset clears LastOutput'
 
 if [[ "$MODE" != "core" ]]; then

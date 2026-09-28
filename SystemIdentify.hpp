@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <concepts>
 #include <cstdint>
@@ -36,7 +37,8 @@ enum class IdentifyAbort : uint8_t {
   OMEGA_LIMIT,
   PITCH_ANGLE_LIMIT,
   AXIS_TIMEOUT,
-  EXTERNAL_EVENT
+  EXTERNAL_EVENT,
+  NUMERICAL_DIVERGENCE
 };
 
 /// @brief 标量展开的递推最小二乘（带遗忘因子），数学上与
@@ -116,11 +118,30 @@ class RlsIdent final {
     }
   }
 
-  /// @brief 参数投影（J>0、B>=0 等物理约束），在 Update 后调用。
-  void Project(uint32_t index, float minimum) {
+  /// @brief 参数投影（物理界限），在 Update 后调用。下限保证正性，
+  /// 上限阻断发散通道——实车实测缺失上限时毛刺可把 theta 推至 1e19。
+  void Project(uint32_t index, float minimum, float maximum) {
     if (theta_[index] < minimum) {
       theta_[index] = minimum;
     }
+    if (theta_[index] > maximum) {
+      theta_[index] = maximum;
+    }
+  }
+
+  /// @brief theta 与 P 全部有限（NaN/inf 看门狗）。
+  [[nodiscard]] bool IsFinite() const {
+    for (uint32_t i = 0; i < dim; i++) {
+      if (!std::isfinite(theta_[i])) {
+        return false;
+      }
+      for (uint32_t j = 0; j < dim; j++) {
+        if (!std::isfinite(p_[i][j])) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   [[nodiscard]] float Theta(uint32_t index) const { return theta_[index]; }
@@ -284,6 +305,9 @@ class SystemIdentify final {
     if (!std::isfinite(dt_s) || dt_s <= 0.0f) {
       return 0.0f;
     }
+    // dt 钳制到控制环正常带内：墙钟实测 dt 在调度追赶时可能远小于 1ms，
+    // alpha = 差分/dt 会按比例爆炸并不可逆污染 RLS（实车实测残余溢出 inf）。
+    dt_s = std::clamp(dt_s, MIN_DT_S, MAX_DT_S);
     state_time_s_ += dt_s;
 
     switch (state_) {
@@ -307,6 +331,16 @@ class SystemIdentify final {
 
  private:
   static constexpr float MIN_J_KG_M2 = 1e-5f;
+  static constexpr float MAX_J_KG_M2 = 1.0f;
+  static constexpr float MAX_B_NMS_RAD = 5.0f;
+  static constexpr float MAX_TAU_C_NM = 2.0f;
+  static constexpr float MAX_MGL_NM = 5.0f;
+  static constexpr float MIN_DT_S = 0.0005f;
+  static constexpr float MAX_DT_S = 0.002f;
+  // innovation 野值上限：激励幅值 <= 0.5 N*m，合理模型误差不可能超此量级；
+  // 超过即判为传感毛刺/dt 异常并跳过本次更新，阻断发散通道。
+  static constexpr float INNOVATION_LIMIT_NM = 2.0f;
+  static constexpr float CONVERGED_RESIDUAL_RATIO = 0.1f;
   static constexpr float TWO_PI = 6.283185307179586f;
 
   const Config config_;
@@ -393,6 +427,17 @@ class SystemIdentify final {
     const float OMEGA_RAW =
         yaw_axis ? sensors.yaw_omega_rad_s : sensors.pit_omega_rad_s;
 
+    // 传感输入有限性检查：陀螺/欧拉角毛刺（NaN/inf）会经差分放大进入
+    // alpha 并永久污染 RLS；本周期跳过全部滤波与更新，激励力矩照常输出。
+    if (!std::isfinite(OMEGA_RAW) || !std::isfinite(sensors.pit_theta_rad)) {
+      const float TAU_SKIP =
+          yaw_axis ? config_.step_torque_yaw_nm : config_.step_torque_pit_nm;
+      const uint32_t HALF_SKIP =
+          static_cast<uint32_t>(state_time_s_ / config_.step_half_period_s);
+      const float AMP_SKIP = (HALF_SKIP / 2U % 2U == 0U) ? 1.0f : 0.6f;
+      return ((HALF_SKIP % 2U == 0U) ? TAU_SKIP : -TAU_SKIP) * AMP_SKIP;
+    }
+
     if (!MOTOR_ONLINE) {
       Abort(IdentifyAbort::MOTOR_OFFLINE);
       return 0.0f;
@@ -461,20 +506,37 @@ class SystemIdentify final {
         const float INNOVATION = tau_f2_prev_ - PHI[0] * rls_yaw_.Theta(0) -
                                  PHI[1] * rls_yaw_.Theta(1) -
                                  PHI[2] * rls_yaw_.Theta(2);
-        rls_yaw_.Update(PHI, tau_f2_prev_);
-        rls_yaw_.Project(0, MIN_J_KG_M2);
-        rls_yaw_.Project(1, 0.0f);
-        AccumulateResidual(INNOVATION, tau_f2_prev_);
+        // 野值剔除：超上限的 innovation 判为毛刺，跳过更新与统计。
+        if (std::fabs(INNOVATION) <= INNOVATION_LIMIT_NM) {
+          rls_yaw_.Update(PHI, tau_f2_prev_);
+          rls_yaw_.Project(0, MIN_J_KG_M2, MAX_J_KG_M2);
+          rls_yaw_.Project(1, 0.0f, MAX_B_NMS_RAD);
+          rls_yaw_.Project(2, -MAX_TAU_C_NM, MAX_TAU_C_NM);
+          AccumulateResidual(INNOVATION, tau_f2_prev_);
+        }
+        // NaN/inf 看门狗：任何数值异常立即中止，垃圾结果不得锁存。
+        if (!rls_yaw_.IsFinite()) {
+          Abort(IdentifyAbort::NUMERICAL_DIVERGENCE);
+          return 0.0f;
+        }
       } else {
         const float PHI[4] = {alpha_f_, omega_f2_, coulomb_f2_, gravity_f2_};
         const float INNOVATION = tau_f2_prev_ - PHI[0] * rls_pit_.Theta(0) -
                                  PHI[1] * rls_pit_.Theta(1) -
                                  PHI[2] * rls_pit_.Theta(2) -
                                  PHI[3] * rls_pit_.Theta(3);
-        rls_pit_.Update(PHI, tau_f2_prev_);
-        rls_pit_.Project(0, MIN_J_KG_M2);
-        rls_pit_.Project(1, 0.0f);
-        AccumulateResidual(INNOVATION, tau_f2_prev_);
+        if (std::fabs(INNOVATION) <= INNOVATION_LIMIT_NM) {
+          rls_pit_.Update(PHI, tau_f2_prev_);
+          rls_pit_.Project(0, MIN_J_KG_M2, MAX_J_KG_M2);
+          rls_pit_.Project(1, 0.0f, MAX_B_NMS_RAD);
+          rls_pit_.Project(2, -MAX_TAU_C_NM, MAX_TAU_C_NM);
+          rls_pit_.Project(3, -MAX_MGL_NM, MAX_MGL_NM);
+          AccumulateResidual(INNOVATION, tau_f2_prev_);
+        }
+        if (!rls_pit_.IsFinite()) {
+          Abort(IdentifyAbort::NUMERICAL_DIVERGENCE);
+          return 0.0f;
+        }
       }
     }
     return TAU_RAW;
@@ -523,6 +585,12 @@ class SystemIdentify final {
                                   : 0.0f;
     }
     result.update_count = update_count_;
-    result.converged = update_count_ > 0U;
+    // 收敛判据硬化：残差比有限且低于阈值才算收敛——仅按更新次数会把
+    // 发散后的垃圾值伪装成成功（实车实测 j=1.97/b=36 仍 converged=1）。
+    result.converged = update_count_ > 0U &&
+                       std::isfinite(result.residual_ratio) &&
+                       result.residual_ratio < CONVERGED_RESIDUAL_RATIO &&
+                       std::isfinite(result.j) && std::isfinite(result.b) &&
+                       std::isfinite(result.tau_c) && std::isfinite(result.mgl);
   }
 };

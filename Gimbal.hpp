@@ -360,6 +360,10 @@ class Gimbal : public LibXR::Application {
   void Update() {
     // 上电一次性钩子：system_identify.enabled 时自动进入辨识模式。
     // 辨识完成后锁死 RELAX（见 SetMode），须以 enabled:false 重启恢复正常使用。
+    // 操作规程：右拨杆置上段（RELAX）、先开 RC 再上电——拨杆在中/下段时
+    // EventBinder 位置事件会先把 current_mode_ 置为 COMMON/VISION，钩子
+    // 条件不再成立，辨识不会进入；ARMING 期的 RELAX 位置事件由 SetMode
+    // 放行（见 SetMode 注释）。
     if (!identify_boot_checked_) {
       identify_boot_checked_ = true;
       if (system_identify_.GetConfig().enabled &&
@@ -853,8 +857,20 @@ class Gimbal : public LibXR::Application {
     if (identify_relax_lock_ && gimbal_event != GimbalEvent::SET_MODE_RELAX) {
       return;
     }
-    // 辨识进行中收到任何外部模式事件（含 lost ctrl 强制的
+    // ARMING 期放行 RELAX：EventBinder 的拨杆电平映射在 RC 上线/复联
+    // 首帧会补发"右拨杆上段=RELAX"的位置事件（DR16 首帧不走失联边沿
+    // 基线），这是安全默认位置而非操作手接管意图，忽略之，倒计时不
+    // 中断；RC 失联由 StepArming 的 rc_online 门控兜底（离线持续重置
+    // 倒计时）。COMMON/VISION 仍是明确接管意图，照常中止。
+    // 操作规程：辨识时右拨杆置上段（RELAX）、先开 RC 再上云台板电。
+    if (current_mode_ == GimbalEvent::SET_MODE_IDENTIFY &&
+        gimbal_event == GimbalEvent::SET_MODE_RELAX &&
+        system_identify_.State() == IdentifyState::ARMING) {
+      return;
+    }
+    // 辨识进行中收到任何外部模式事件（激励/静置期含 lost ctrl 强制的
     // RELAX）= 操作手中止：锁存已收敛轴结果，强制回 RELAX 并上锁。
+    // （ARMING 期的 RELAX 已在上方放行，不会走到这里。）
     if (current_mode_ == GimbalEvent::SET_MODE_IDENTIFY &&
         gimbal_event != GimbalEvent::SET_MODE_IDENTIFY &&
         system_identify_.IsActive()) {
