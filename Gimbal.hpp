@@ -683,12 +683,14 @@ class Gimbal : public LibXR::Application {
              float& yaw_output) {
     const float PIT_ERROR = feedforward.pitch_angle - euler_.Pitch();
     const float LAST_PIT_ANGLE_LOOP_OMEGA = pid_pit_angle_.LastOutput();
+    // sp=误差、fb=0 与 sp=目标、fb=角度 等价，故 fb_dot 取 +角速度：
+    // D 项 -d*fb_dot 作用于实测角速度（微分先行），yaw 同理。
     const float PIT_ANGLE_LOOP_OMEGA =
-        pid_pit_angle_.Calculate(PIT_ERROR, 0.0f, dt_);
+        pid_pit_angle_.Calculate(PIT_ERROR, 0.0f, gyro_data_.y(), dt_);
     const float TARGET_PIT_OMEGA =
         PIT_ANGLE_LOOP_OMEGA + feedforward.pitch_omega;
     const float PIT_ALPHA =
-        (PIT_ANGLE_LOOP_OMEGA - LAST_PIT_ANGLE_LOOP_OMEGA) / dt_ +
+        AngleLoopAlpha(PIT_ANGLE_LOOP_OMEGA, LAST_PIT_ANGLE_LOOP_OMEGA) +
         feedforward.pitch_alpha;
     const float PITCH_FEEDFORWARD =
         PARAM.j_pit * PIT_ALPHA -
@@ -706,15 +708,25 @@ class Gimbal : public LibXR::Application {
     }
   }
 
+  /**
+   * @brief 角度环输出差分得到的角加速度前馈；dt_ 非法时置 0
+   */
+  float AngleLoopAlpha(float omega, float last_omega) const {
+    if (!std::isfinite(dt_) || dt_ <= 0.0f) {
+      return 0.0f;
+    }
+    return (omega - last_omega) / dt_;
+  }
+
   void SolvePidYaw(const CycleFeedforward& feedforward, float& yaw_output) {
     const float YAW_ERROR =
         LibXR::CycleValue<float>(feedforward.yaw_angle) - euler_.Yaw();
     const float LAST_YAW_ANGLE_LOOP_OMEGA = pid_yaw_angle_.LastOutput();
     const float YAW_ANGLE_LOOP_OMEGA =
-        pid_yaw_angle_.Calculate(YAW_ERROR, 0.0f, dt_);
+        pid_yaw_angle_.Calculate(YAW_ERROR, 0.0f, gyro_data_.z(), dt_);
     const float TARGET_YAW_OMEGA = YAW_ANGLE_LOOP_OMEGA + feedforward.yaw_omega;
     const float YAW_ALPHA =
-        (YAW_ANGLE_LOOP_OMEGA - LAST_YAW_ANGLE_LOOP_OMEGA) / dt_ +
+        AngleLoopAlpha(YAW_ANGLE_LOOP_OMEGA, LAST_YAW_ANGLE_LOOP_OMEGA) +
         feedforward.yaw_alpha;
     const bool ROTOR_FF_ACTIVE =
         PARAM.rotor_ff_enabled && chassis_motion_state_.online &&
