@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <concepts>
 #include <cstdint>
@@ -287,9 +288,9 @@ class YawLqrEso final {
       theta_integral_rad_s_ = 0.0f;
     } else {
       theta_integral_rad_s_ =
-          Clamp(theta_integral_rad_s_ + output.e_theta_rad * dt_s,
-                -config_.theta_integral_limit_rad_s,
-                config_.theta_integral_limit_rad_s);
+          std::clamp(theta_integral_rad_s_ + output.e_theta_rad * dt_s,
+                     -config_.theta_integral_limit_rad_s,
+                     config_.theta_integral_limit_rad_s);
     }
     output.tau_lqi_nm = -config_.k_i * theta_integral_rad_s_;
 
@@ -301,8 +302,8 @@ class YawLqrEso final {
     if (config_.eso_comp_enable && observer_ready_) {
       const float PLANT_INPUT_GAIN = 1.0f / j_kg_m2;
       output.tau_eso_raw_nm =
-          Clamp(-config_.eso_comp_gain * z3_ / PLANT_INPUT_GAIN,
-                -config_.eso_comp_limit_nm, config_.eso_comp_limit_nm);
+          std::clamp(-config_.eso_comp_gain * z3_ / PLANT_INPUT_GAIN,
+                     -config_.eso_comp_limit_nm, config_.eso_comp_limit_nm);
       const bool OMEGA_GATE_PASSED =
           config_.eso_omega_gate_rad_s <= 0.0f ||
           std::fabs(feedback.omega_rad_s) <= config_.eso_omega_gate_rad_s;
@@ -327,7 +328,7 @@ class YawLqrEso final {
         tau_meas_lpf_nm_ += config_.tau_meas_lpf_alpha *
                             (feedback.tau_meas_nm - tau_meas_lpf_nm_);
       }
-      tau_bias_nm_ = Clamp(
+      tau_bias_nm_ = std::clamp(
           tau_bias_nm_ + config_.tau_bias_ki *
                              (TORQUE_WITHOUT_BIAS_NM - tau_meas_lpf_nm_) * dt_s,
           -config_.tau_bias_limit_nm, config_.tau_bias_limit_nm);
@@ -346,8 +347,8 @@ class YawLqrEso final {
     float constrained_torque_nm = output.tau_pre_limit_nm;
     if (config_.torque_soft_limit_nm > 0.0f) {
       const float SOFT_LIMITED_TORQUE_NM =
-          Clamp(constrained_torque_nm, -config_.torque_soft_limit_nm,
-                config_.torque_soft_limit_nm);
+          std::clamp(constrained_torque_nm, -config_.torque_soft_limit_nm,
+                     config_.torque_soft_limit_nm);
       output.soft_limit_active =
           SOFT_LIMITED_TORQUE_NM != constrained_torque_nm;
       constrained_torque_nm = SOFT_LIMITED_TORQUE_NM;
@@ -356,7 +357,7 @@ class YawLqrEso final {
     const bool HARD_LIMIT_ENABLED = torque_limit_nm > 0.0f;
     if (HARD_LIMIT_ENABLED) {
       const float HARD_LIMITED_TORQUE_NM =
-          Clamp(constrained_torque_nm, -torque_limit_nm, torque_limit_nm);
+          std::clamp(constrained_torque_nm, -torque_limit_nm, torque_limit_nm);
       output.hard_limit_active =
           HARD_LIMITED_TORQUE_NM != constrained_torque_nm;
       constrained_torque_nm = HARD_LIMITED_TORQUE_NM;
@@ -396,8 +397,8 @@ class YawLqrEso final {
       if (limit_intersection_enabled &&
           limit_intersection_min_nm <= limit_intersection_max_nm) {
         next_slew_anchor_torque_nm =
-            Clamp(next_slew_anchor_torque_nm, limit_intersection_min_nm,
-                  limit_intersection_max_nm);
+            std::clamp(next_slew_anchor_torque_nm, limit_intersection_min_nm,
+                       limit_intersection_max_nm);
       } else if (limit_intersection_enabled) {
         next_slew_anchor_torque_nm = output.tau_cmd_before_slew_nm;
       }
@@ -412,7 +413,7 @@ class YawLqrEso final {
         return {};
       }
       output.tau_cmd_nm =
-          Clamp(output.tau_cmd_before_slew_nm, SLEW_MIN_NM, SLEW_MAX_NM);
+          std::clamp(output.tau_cmd_before_slew_nm, SLEW_MIN_NM, SLEW_MAX_NM);
       output.slew_limit_active =
           output.tau_cmd_nm != output.tau_cmd_before_slew_nm;
     }
@@ -451,17 +452,6 @@ class YawLqrEso final {
   static constexpr float MIN_DT_S = 0.0005f;
   static constexpr float MAX_DT_S = 0.02f;
   static constexpr float EPSILON = 1e-6f;
-
-  /** @brief Clamp a scalar to an inclusive range. */
-  static float Clamp(float value, float minimum, float maximum) {
-    if (value < minimum) {
-      return minimum;
-    }
-    if (value > maximum) {
-      return maximum;
-    }
-    return value;
-  }
 
   /** @brief Remove a symmetric deadband from a scalar error. */
   static float Deadband(float value, float deadband) {

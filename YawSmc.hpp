@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <concepts>
 #include <type_traits>
@@ -188,8 +189,8 @@ class YawSmc final {
     float constrained_torque_nm = output.tau_pre_limit_nm;
     if (config_.torque_soft_limit_nm > 0.0f) {
       const float SOFT_LIMITED_TORQUE_NM =
-          Clamp(constrained_torque_nm, -config_.torque_soft_limit_nm,
-                config_.torque_soft_limit_nm);
+          std::clamp(constrained_torque_nm, -config_.torque_soft_limit_nm,
+                     config_.torque_soft_limit_nm);
       output.soft_limit_active =
           SOFT_LIMITED_TORQUE_NM != constrained_torque_nm;
       constrained_torque_nm = SOFT_LIMITED_TORQUE_NM;
@@ -198,7 +199,7 @@ class YawSmc final {
     const bool HARD_LIMIT_ENABLED =
         config_.torque_min_nm < config_.torque_max_nm;
     if (HARD_LIMIT_ENABLED) {
-      const float HARD_LIMITED_TORQUE_NM = Clamp(
+      const float HARD_LIMITED_TORQUE_NM = std::clamp(
           constrained_torque_nm, config_.torque_min_nm, config_.torque_max_nm);
       output.hard_limit_active =
           HARD_LIMITED_TORQUE_NM != constrained_torque_nm;
@@ -239,8 +240,8 @@ class YawSmc final {
       if (limit_intersection_enabled &&
           limit_intersection_min_nm <= limit_intersection_max_nm) {
         next_slew_anchor_torque_nm =
-            Clamp(next_slew_anchor_torque_nm, limit_intersection_min_nm,
-                  limit_intersection_max_nm);
+            std::clamp(next_slew_anchor_torque_nm, limit_intersection_min_nm,
+                       limit_intersection_max_nm);
       } else if (limit_intersection_enabled) {
         next_slew_anchor_torque_nm = output.tau_cmd_before_slew_nm;
       }
@@ -256,7 +257,7 @@ class YawSmc final {
         return {};
       }
       output.tau_cmd_nm =
-          Clamp(output.tau_cmd_before_slew_nm, SLEW_MIN_NM, SLEW_MAX_NM);
+          std::clamp(output.tau_cmd_before_slew_nm, SLEW_MIN_NM, SLEW_MAX_NM);
       output.slew_limit_active =
           output.tau_cmd_nm != output.tau_cmd_before_slew_nm;
     }
@@ -290,16 +291,6 @@ class YawSmc final {
   static constexpr float MIN_J_KG_M2 = 1e-6f;
   static constexpr float MIN_DT_S = 0.0005f;
   static constexpr float MAX_DT_S = 0.02f;
-
-  static float Clamp(float value, float minimum, float maximum) {
-    if (value < minimum) {
-      return minimum;
-    }
-    if (value > maximum) {
-      return maximum;
-    }
-    return value;
-  }
 
   static float Sat(float y) {
     if (y > 1.0f) {

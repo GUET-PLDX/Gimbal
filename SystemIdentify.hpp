@@ -7,6 +7,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "libxr_def.hpp"
+
 // 云台 Pitch/Yaw 轴 J/B 在线辨识（一次性标定工具）。
 //
 // 被控对象模型（《单轴云台最优控制器设计》第 1 节）：
@@ -341,7 +343,6 @@ class SystemIdentify final {
   // 超过即判为传感毛刺/dt 异常并跳过本次更新，阻断发散通道。
   static constexpr float INNOVATION_LIMIT_NM = 2.0f;
   static constexpr float CONVERGED_RESIDUAL_RATIO = 0.1f;
-  static constexpr float TWO_PI = 6.283185307179586f;
 
   const Config config_;
   RlsIdent<3> rls_yaw_;  ///< [J, B, tau_c]
@@ -376,7 +377,8 @@ class SystemIdentify final {
   AxisResult pit_result_{};
 
   float LpfAlpha(float dt_s) const {
-    const float RC = 1.0f / (TWO_PI * config_.lpf_cutoff_hz);
+    const float RC =
+        1.0f / (static_cast<float>(LibXR::TWO_PI) * config_.lpf_cutoff_hz);
     return dt_s / (dt_s + RC);
   }
 

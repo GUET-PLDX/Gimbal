@@ -425,7 +425,7 @@ class Gimbal : public LibXR::Application {
               (LibXR::Timebase::GetMilliseconds() - patrol_.start_time)
                   .ToMillisecond()) /
           1000.0f;
-      constexpr float TWO_OVER_PI = 0.6366197723675814f;
+      constexpr float TWO_OVER_PI = 2.0f / static_cast<float>(LibXR::PI);
       feedforward.pitch_angle =
           patrol_.pitch_center_rad +
           PARAM.patrol_pitch_amplitude_rad * TWO_OVER_PI *
