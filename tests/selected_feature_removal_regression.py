@@ -11,8 +11,6 @@ source = pathlib.Path(args.header).read_text()
 
 forbidden = {
     "RELAX-only request consumer": "ConsumePendingRelaxRequest(",
-    "configurable Euler Topic": "euler_topic_name",
-    "configurable gyro Topic": "gyro_topic_name",
     "IMU online state": "imu_online_",
     "control period validity state": "dt_valid_",
     "minimum control period": "CONTROL_DT_MIN",
@@ -39,8 +37,8 @@ for description, token in forbidden.items():
         raise SystemExit(f"forbidden: {description}")
 
 required = {
-    "fixed Euler Topic": r'euler_suber\s*\(\s*"gimbal_euler"\s*\)',
-    "fixed gyro Topic": r'gyro_suber\s*\(\s*"gimbal_gyro"\s*\)',
+    "Euler Topic binding": r'euler_suber\s*\(\s*gimbal->PARAM\.euler_topic_name\s*\)',
+    "gyro Topic binding": r'gyro_suber\s*\(\s*gimbal->PARAM\.gyro_topic_name\s*\)',
     "AI Yaw solver": r"void\s+Solve\s*\(\s*const\s+CycleFeedforward&\s+feedforward\s*,\s*float&\s+pit_output",
     "AI output validity guard": r"if\s*\(\s*!YAW_LQR_ESO_OUTPUT\.valid",
     "local control mode": r"const\s+auto\s+CTRL_MODE\s*=\s*cmd_\.GetCtrlMode\(\)",

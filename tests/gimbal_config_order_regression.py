@@ -290,6 +290,9 @@ expected_gimbal_param = (
     "rotor_ff_enabled",
     "yaw_manual_controller",
     "yaw_ai_controller",
+    "euler_topic_name",
+    "gyro_topic_name",
+    "gimbal_cmd_topic_name",
 )
 if tuple(gimbal_param.keys()) != expected_gimbal_param:
     raise SystemExit("GimbalParam field order mismatch")

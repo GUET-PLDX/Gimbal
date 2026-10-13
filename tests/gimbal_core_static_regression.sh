@@ -218,12 +218,11 @@ need_multiline \
   'LibXR::Thread::Priority thread_priority = LibXR::Thread::Priority::MEDIUM,\s*bool rotor_ff_enabled = false,\s*YawManualController yaw_manual_controller = YawManualController::PID,\s*YawAiController yaw_ai_controller = YawAiController::LQR_ESO,\s*YawLqrEso::Config yaw_lqr_eso = \{\},\s*YawSmc::Config yaw_smc = \{\}\)' \
   'manual and AI Yaw controllers appended after thread priority'
 need_multiline \
-  'ASyncSubscriber<LibXR::EulerAngle<float>> euler_suber\s*\(\s*"gimbal_euler"\s*\)' \
-  'Euler subscriber uses fixed Gimbal Topic name'
+  'ASyncSubscriber<LibXR::EulerAngle<float>> euler_suber\s*\(\s*gimbal->PARAM\.euler_topic_name\s*\)' \
+  'Euler subscriber uses configured Gimbal Topic name'
 need_multiline \
-  'ASyncSubscriber<Eigen::Matrix<float, 3, 1>> gyro_suber\s*\(\s*"gimbal_gyro"\s*\)' \
-  'gyro subscriber uses fixed Gimbal Topic name'
-forbid 'euler_topic_name|gyro_topic_name' 'configurable Gimbal IMU Topic names'
+  'ASyncSubscriber<Eigen::Matrix<float, 3, 1>> gyro_suber\s*\(\s*gimbal->PARAM\.gyro_topic_name\s*\)' \
+  'gyro subscriber uses configured Gimbal Topic name'
 need 'bool rotor_ff_enabled_ = false' 'default-disabled feature flag member'
 need 'ChassisMotionState chassis_motion_state_\{\}' \
   'default-initialized semantic chassis motion state member'
@@ -280,7 +279,7 @@ need_multiline \
   'static void InitializeTopics\(\) \{\s*YawAngleTopic\(\);\s*PitchAngleTopic\(\);\s*YawOmegaTopic\(\);\s*PitchOmegaTopic\(\);\s*ModeTopic\(\);\s*VisionTaskTopic\(\);\s*\}' \
   'constructor-time initialization of all lazy Topic handles'
 need_multiline \
-  '(?s)Gimbal\(.*?\)\s*:.*?\{\s*UNUSED\(app\);\s*InitializeTopics\(\);\s*ChassisMotionStateTopic\(\);\s*thread_\.Create\(' \
+  '(?s)Gimbal\(.*?\)\s*:.*?\{\s*UNUSED\(app\);.*?InitializeTopics\(\);\s*ChassisMotionStateTopic\(\);\s*thread_\.Create\(' \
   'Topic initialization before the Gimbal thread starts'
 need_multiline \
   '(?s)YawOmegaTopic\(\)\.Publish\(gyro_data_\.z\(\)\);\s*PitchOmegaTopic\(\)\.Publish\(gyro_data_\.y\(\)\);' \

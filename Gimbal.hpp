@@ -58,6 +58,9 @@ constructor_args:
       rotor_ff_enabled: false
       yaw_manual_controller: YawManualController::PID
       yaw_ai_controller: YawAiController::LQR_ESO
+      euler_topic_name: gimbal_euler
+      gyro_topic_name: gimbal_gyro
+      gimbal_cmd_topic_name: gimbal_cmd
   - yaw_lqr_eso:
       k_theta: 1.0
       k_omega: 1.0
@@ -189,6 +192,9 @@ class Gimbal : public LibXR::Application {
     bool rotor_ff_enabled = false;
     YawManualController yaw_manual_controller = YawManualController::PID;
     YawAiController yaw_ai_controller = YawAiController::LQR_ESO;
+    const char* euler_topic_name = "gimbal_euler";
+    const char* gyro_topic_name = "gimbal_gyro";
+    const char* gimbal_cmd_topic_name = "gimbal_cmd";
   };
 
   struct CycleFeedforward {
@@ -267,6 +273,13 @@ class Gimbal : public LibXR::Application {
         yaw_smc_(CheckedSmcConfig(std::move(yaw_smc), gimbal_param.j_yaw)),
         system_identify_(CheckedSysIdConfig(std::move(system_identify))) {
     UNUSED(app);
+    REQUIRE(motor_yaw_ != nullptr && motor_pit_ != nullptr);
+    REQUIRE(PARAM.euler_topic_name != nullptr &&
+            PARAM.euler_topic_name[0] != '\0');
+    REQUIRE(PARAM.gyro_topic_name != nullptr &&
+            PARAM.gyro_topic_name[0] != '\0');
+    REQUIRE(PARAM.gimbal_cmd_topic_name != nullptr &&
+            PARAM.gimbal_cmd_topic_name[0] != '\0');
     InitializeTopics();
     ChassisMotionStateTopic();
     thread_.Create(this, ThreadFunc, "GimbalThread", task_stack_depth,
@@ -310,11 +323,12 @@ class Gimbal : public LibXR::Application {
    * @param gimbal Gimbal实例指针
    */
   static void ThreadFunc(Gimbal* gimbal) {
-    LibXR::Topic::ASyncSubscriber<CMD::GimbalCMD> cmd_suber("gimbal_cmd");
+    LibXR::Topic::ASyncSubscriber<CMD::GimbalCMD> cmd_suber(
+        gimbal->PARAM.gimbal_cmd_topic_name);
     LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>> euler_suber(
-        "gimbal_euler");
+        gimbal->PARAM.euler_topic_name);
     LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>> gyro_suber(
-        "gimbal_gyro");
+        gimbal->PARAM.gyro_topic_name);
     LibXR::Topic::ASyncSubscriber<ChassisMotionState>
         chassis_motion_state_suber(ChassisMotionStateTopic());
     cmd_suber.StartWaiting();
@@ -543,10 +557,7 @@ class Gimbal : public LibXR::Application {
 
   /**
    * @brief 校验并透传 AI Yaw LQR/ESO 配置；非法配置在构造期直接挂起。
-   * @note 校验放在初始化列表而不是构造函数体：① 函数体开头
-   *       `UNUSED(app); InitializeTopics(); ChassisMotionStateTopic();
-   *        thread_.Create(` 的连续片段被 tests/gimbal_core_static_regression.sh
-   *       钉住，插不进语句；② 校验必须先于控制线程启动。
+   * @note 校验放在初始化列表，在控制线程启动前完成。
    * @note REQUIRE 只能出现在本文件：控制器头里调用会让主机测试链接阶段
    *       undefined reference（那些测试不链接 libxr_fatal_error）。
    */

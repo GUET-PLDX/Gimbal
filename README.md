@@ -83,6 +83,13 @@ yaw_smc.Calculate(reference, feedback, dt_s, j_kg_m2);
 - `gimbal_gyro`：云台 IMU 原始角速度。
 - `chassis_motion_state`：底盘运动状态（在线、模式、yaw 角速度），供小陀螺模式前馈使用。
 
+前三个输入名称由 `GimbalParam` 的 `gimbal_cmd_topic_name`、`euler_topic_name`、
+`gyro_topic_name` 配置，默认值如上。YAML 按位置展开聚合参数，三个字段应按
+`euler_topic_name`、`gyro_topic_name`、`gimbal_cmd_topic_name` 的顺序追加在
+`yaw_ai_controller` 后。Topic 名称字符串必须在模块运行期间保持有效，推荐使用
+YAML 字符串或 C++ 字符串字面量；订阅名必须与发布者一致。构造期通过 `REQUIRE`
+检查电机指针及非空 Topic 名称，失败时在控制线程启动前报错并挂起。
+
 云台状态输出 topic：
 - `yawmotor_angle` / `pitchmotor_angle`：电机绝对角，rad。
 - `yawmotor_omega` / `pitchmotor_omega`：与内环同符号的 IMU 实测角速度，rad/s（yaw=`gyro.z`，pitch=`gyro.y` 已按云台约定取反）。每个控制周期无条件发布，不做陀螺新鲜度判定。
