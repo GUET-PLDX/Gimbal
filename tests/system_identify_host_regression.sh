@@ -13,7 +13,7 @@ mkdir -p "${BUILD_DIR}"
 FLAGS=(-std=c++20 -Wall -Wextra -Werror -pedantic -ffp-contract=off
        -DLIBXR_DEFAULT_SCALAR=float
        -I"${MODULE_DIR}" -I"${MODULE_DIR}/tests"
-       -I"${WORKSPACE_ROOT}/Middlewares/Third_Party/LibXR/src/core")
+       -I"${WORKSPACE_ROOT}/.tooling/LibXR-v2.0.1/src/core")
 if [[ "${SANITIZE:-0}" == "1" ]]; then
   FLAGS+=(-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer)
 else

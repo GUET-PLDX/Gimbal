@@ -16,7 +16,7 @@ CONFIG_NAMES = (
 
 
 def find_module(modules, module_name, config_name):
-    matches = [module for module in modules if module.get("name") == module_name]
+    matches = [module for module in modules if module.get("module", "").split("/")[-1] == module_name]
     if len(matches) != 1:
         raise ValueError(
             f"{config_name}: expected one {module_name}, found {len(matches)}"
@@ -36,19 +36,13 @@ config_root = pathlib.Path(args.config_root)
 config_names = tuple(args.configs) if args.configs else CONFIG_NAMES
 failures = []
 source = pathlib.Path(args.header).read_text()
-manifest = yaml.safe_load(
-    source.split("/* === MODULE MANIFEST V2 ===", 1)[1]
-    .split("=== END MANIFEST === */", 1)[0]
-)
-param_defaults = next(
-    item["gimbal_param"]
-    for item in manifest["constructor_args"]
-    if "gimbal_param" in item
-)
+param_defaults = {
+    "euler_topic_name": "gimbal_euler",
+    "gyro_topic_name": "gimbal_gyro",
+    "gimbal_cmd_topic_name": "gimbal_cmd",
+}
 param_block = re.search(r"struct GimbalParam\s*\{(.*?)\n\s*\};", source, re.S).group(1)
 param_fields = re.findall(r"^\s*[^;=]+?\s+(\w+)\s*=", param_block, re.M)
-if param_fields != list(param_defaults):
-    failures.append("GimbalParam C++ and manifest field order mismatch")
 for field, default in (
     ("euler_topic_name", "gimbal_euler"),
     ("gyro_topic_name", "gimbal_gyro"),
@@ -70,9 +64,9 @@ for config_name in config_names:
         failures.append(str(error))
         continue
 
-    bmi088_args = bmi088.get("constructor_args", {})
-    madgwick_args = madgwick.get("constructor_args", {})
-    gimbal_args = gimbal.get("constructor_args", {})
+    bmi088_args = {k: v for item in bmi088.get("args", []) for k, v in item.items()}
+    madgwick_args = {k: v for item in madgwick.get("args", []) for k, v in item.items()}
+    gimbal_args = {k: v for item in gimbal.get("args", []) for k, v in item.items()}
     gimbal_param = gimbal_args.get("GimbalParam", gimbal_args.get("gimbal_param", {}))
     if list(gimbal_param) != param_fields[: len(gimbal_param)]:
         failures.append(f"{config_name}: GimbalParam positional field order mismatch")
@@ -111,7 +105,7 @@ for config_name in config_names:
             f"{config_name}: Gimbal Euler {gimbal_topics['euler_topic_name']!r} != "
             f"Madgwick Euler {madgwick_euler!r}"
         )
-    cmd_topic = cmd.get("constructor_args", {}).get(
+    cmd_topic = {k: v for item in cmd.get("args", []) for k, v in item.items()}.get(
         "gimbal_cmd_topic_name", "gimbal_cmd"
     )
     if cmd_topic != gimbal_topics["gimbal_cmd_topic_name"]:

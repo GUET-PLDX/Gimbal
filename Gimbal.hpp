@@ -3,128 +3,11 @@
 // clang-format off
 /* === MODULE MANIFEST V2 ===
 module_description: No description provided
-constructor_args:
-  - cmd: '@cmd'
-  - task_stack_depth: 2048
-  - pid_yaw_angle:
-      k: 0.0
-      p: 0.0
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 0.0
-      cycle: true
-  - pid_yaw_omega:
-      k: 0.0
-      p: 0.0
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 2.223
-      cycle: true
-  - pid_pit_angle:
-      k: 0.0
-      p: 0.0
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 0.0
-      cycle: false
-  - pid_pit_omega:
-      k: 0.0
-      p: 0.0
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 0.0
-      cycle: false
-  - motor_pitch: '@&motor_pit'
-  - motor_yaw: '@&motor_yaw'
-  - gimbal_param:
-      pit_max_angle: 0.0
-      pit_min_angle: 0.0
-      pit_lc: 0.0
-      pit_theta: 0.0
-      yaw_k: 0.0
-      j_pit: 0.0
-      j_yaw: 0.0
-      pit_zero: 0.0
-      yaw_zero: 0.0
-      patrol_pitch_amplitude_rad: 0.0
-      patrol_pitch_angular_rate_rad_s: 0.0
-      patrol_yaw_rate_rad_s: 0.0
-      reverse_flag: false
-      thread_priority: LibXR::Thread::Priority::MEDIUM
-      rotor_ff_enabled: false
-      yaw_manual_controller: YawManualController::PID
-      yaw_ai_controller: YawAiController::LQR_ESO
-      euler_topic_name: gimbal_euler
-      gyro_topic_name: gimbal_gyro
-      gimbal_cmd_topic_name: gimbal_cmd
-  - yaw_lqr_eso:
-      k_theta: 1.0
-      k_omega: 1.0
-      k_i: 0.2
-      theta_integral_limit_rad_s: 0.5
-      tau_coulomb_nm: 0.05
-      coulomb_smooth_rad_s: 0.2
-      eso_bandwidth_rad_s: 30.0
-      eso_comp_gain: 1.0
-      eso_comp_limit_nm: 0.3
-      eso_omega_gate_rad_s: 5.0
-      eso_alpha_gate_rad_s2: 50.0
-      tau_bias_ki: 0.5
-      tau_bias_limit_nm: 0.15
-      tau_meas_lpf_alpha: 0.1
-      theta_deadband_rad: 0.0
-      torque_soft_limit_nm: 2.0
-      torque_slew_rate_nm_s: 1000.0
-      eso_enable: true
-      eso_comp_enable: false
-      coulomb_enable: false
-      lqi_enable: false
-      torque_bias_enable: false
-      torque_slew_enable: true
-  - yaw_smc:
-      c: 20.0
-      k: 120.0
-      epsilon: 0.5
-      q: 21.0
-      p: 27.0
-      error_deadband_rad: 0.0
-      ftsmc_switch_rad: 0.017453292519943295
-      sat_boundary: 1.0
-      torque_soft_limit_nm: 2.0
-      torque_min_nm: -2.223
-      torque_max_nm: 2.223
-      torque_slew_rate_nm_s: 1000.0
-      ftsmc_enable: true
-      torque_slew_enable: true
-  - system_identify:
-      enabled: false
-      axis_select: IdentifyAxis::BOTH
-      arming_delay_s: 3.0
-      step_torque_yaw_nm: 0.5
-      step_torque_pit_nm: 0.2
-      step_half_period_s: 0.5
-      step_cycles: 10
-      settle_time_s: 1.0
-      lpf_cutoff_hz: 50.0
-      alpha_gate_rad_s2: 1.0
-      rls_delta: 1000.0
-      rls_lambda: 1.0
-      coulomb_tanh_scale: 0.1
-      omega_abort_yaw: 8.0
-      omega_abort_pit: 4.0
-      pit_angle_margin_rad: 0.1
-      axis_timeout_s: 30.0
-template_args: []
-required_hardware: []
 depends:
-  - pldx/CMD
-  - pldx/Motor
-  - pldx/BMI088
-  - pldx/DualBoard
+- id: GUET-PLDX/CMD
+- id: GUET-PLDX/Motor
+- id: GUET-PLDX/BMI088
+- id: GUET-PLDX/DualBoard
 === END MANIFEST === */
 // clang-format on
 
@@ -137,9 +20,9 @@ depends:
 #include "SystemIdentify.hpp"
 #include "YawLqrEso.hpp"
 #include "YawSmc.hpp"
-#include "app_framework.hpp"
 #include "cycle_value.hpp"
 #include "event.hpp"
+#include "libxr.hpp"
 #include "libxr_def.hpp"
 #include "libxr_time.hpp"
 #include "pid.hpp"
@@ -172,7 +55,7 @@ static_assert(static_cast<uint8_t>(GimbalEvent::SET_VISION_BIG_BUFF) == 6U);
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_IDENTIFY) == 7U);
 enum class YawManualController : uint8_t { PID, SMC };
 enum class YawAiController : uint8_t { LQR_ESO, SMC };
-class Gimbal : public LibXR::Application {
+class Gimbal {
  public:
   struct GimbalParam {
     float pit_max_angle = 0.0f;
@@ -210,8 +93,6 @@ class Gimbal : public LibXR::Application {
   /**
    * @brief 构造函数初始化数据成员
    *
-   * @param hw 硬件容器
-   * @param app 应用管理器
    * @param cmd 命令模块实例
    * @param task_stack_depth 任务堆栈深度
    * @param pid_yaw_angle Yaw轴角度环PID参数
@@ -251,8 +132,8 @@ class Gimbal : public LibXR::Application {
    *       落到默认值）。让最后一个形参没有默认值，就把"漏键"从静默错配变成
    *       **编译错误**。
    */
-  Gimbal(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app, CMD& cmd,
-         uint32_t task_stack_depth, LibXR::PID<float>::Param pid_yaw_angle,
+  Gimbal(CMD& cmd, uint32_t task_stack_depth,
+         LibXR::PID<float>::Param pid_yaw_angle,
          LibXR::PID<float>::Param pid_yaw_omega,
          LibXR::PID<float>::Param pid_pit_angle,
          LibXR::PID<float>::Param pid_pit_omega, Motor* motor_pit,
@@ -272,7 +153,6 @@ class Gimbal : public LibXR::Application {
                                 pid_yaw_omega_.OutLimit(), gimbal_param.yaw_k)),
         yaw_smc_(CheckedSmcConfig(std::move(yaw_smc), gimbal_param.j_yaw)),
         system_identify_(CheckedSysIdConfig(std::move(system_identify))) {
-    UNUSED(app);
     REQUIRE(motor_yaw_ != nullptr && motor_pit_ != nullptr);
     REQUIRE(PARAM.euler_topic_name != nullptr &&
             PARAM.euler_topic_name[0] != '\0');
@@ -511,7 +391,7 @@ class Gimbal : public LibXR::Application {
     ControlYawMotor(yaw_motor_cmd);
   }
 
-  void OnMonitor() override {}
+  void OnMonitor() {}
 
   LibXR::Event& GetEvent() { return gimbal_event_; }
 
