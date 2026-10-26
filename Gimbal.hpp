@@ -382,6 +382,8 @@ class Gimbal {
     feedforward.ai_yaw_active = AI_YAW_ACTIVE;
 
     if (AI_YAW_ACTIVE) {
+      target_pit_cmd_ = cmd_data_.pit;
+      target_yaw_cmd_ = cmd_data_.yaw;
       feedforward.pitch_angle = cmd_data_.pit;
       feedforward.pitch_omega = cmd_data_.pit_dot;
       feedforward.pitch_alpha = cmd_data_.pit_ddot;
@@ -406,15 +408,24 @@ class Gimbal {
       feedforward.yaw_angle =
           patrol_.yaw_origin_rad + PARAM.patrol_yaw_rate_rad_s * ELAPSED_S;
       feedforward.yaw_omega = PARAM.patrol_yaw_rate_rad_s;
+      target_pit_cmd_ = feedforward.pitch_angle;
+      target_yaw_cmd_ = feedforward.yaw_angle;
       return feedforward;
     }
 
-    feedforward.pitch_angle = cmd_data_.pit;
-    feedforward.pitch_omega = cmd_data_.pit_dot;
-    feedforward.pitch_alpha = cmd_data_.pit_ddot;
-    feedforward.yaw_angle = cmd_data_.yaw;
-    feedforward.yaw_omega = cmd_data_.yaw_dot;
-    feedforward.yaw_alpha = cmd_data_.yaw_ddot;
+    const float CONTROL_DT = std::isfinite(dt_) && dt_ > 0.0f ? dt_ : 0.0f;
+    const float PIT_OPERATOR_RATE = cmd_data_.pit * GIMBAL_MAX_SPEED;
+    const float YAW_OPERATOR_RATE =
+        (OPERATOR_CONTROL ? cmd_data_.yaw : -cmd_data_.yaw) * GIMBAL_MAX_SPEED;
+    target_pit_cmd_ += PIT_OPERATOR_RATE * CONTROL_DT;
+    target_yaw_cmd_ += YAW_OPERATOR_RATE * CONTROL_DT;
+    feedforward.pitch_angle = target_pit_cmd_;
+    feedforward.yaw_angle = target_yaw_cmd_;
+    // 手动速度/加速度前馈置零；Solve 对目标角速度逐周期差分计算惯性项。
+    feedforward.pitch_omega = 0.0f;
+    feedforward.pitch_alpha = 0.0f;
+    feedforward.yaw_omega = 0.0f;
+    feedforward.yaw_alpha = 0.0f;
     return feedforward;
   }
 
@@ -439,14 +450,7 @@ class Gimbal {
     PitchLimit(command.pitch_angle, euler_.Pitch(),
                motor_pit_feedback_.abs_angle, PARAM.pit_max_angle,
                PARAM.pit_min_angle, PARAM.reverse_flag ? 1.0f : -1.0f);
-    const bool PATROL_PITCH =
-        !feedforward.ai_yaw_active &&
-        current_mode_ == GimbalEvent::SET_MODE_AUTOPATROL &&
-        cmd_.GetCtrlMode() != CMD::Mode::CMD_OP_CTRL;
-    if (!PATROL_PITCH) {
-      cmd_data_.pit = command.pitch_angle;
-      cmd_.SetGimbalSetpoint(cmd_data_.yaw, command.pitch_angle);
-    }
+    target_pit_cmd_ = command.pitch_angle;
     Solve(command, pit_output, yaw_output);
 
     auto yaw_motor_cmd = Motor::MotorCmd(
@@ -503,6 +507,12 @@ class Gimbal {
   };
 
   PatrolState patrol_{};
+  static constexpr float GIMBAL_MAX_SPEED =
+      static_cast<float>(LibXR::TWO_PI) * 2.0f;
+  float target_pit_cmd_ = 0.0f;
+  float target_yaw_cmd_ = 0.0f;
+  float last_pit_omega_ = 0.0f;
+  float last_yaw_omega_ = 0.0f;
   float dt_ = 0.0f;
   LibXR::MicrosecondTimestamp last_online_time_;
   YawLqrEso yaw_lqr_eso_;
@@ -651,22 +661,21 @@ class Gimbal {
   void Solve(const CycleFeedforward& feedforward, float& pit_output,
              float& yaw_output) {
     const float PIT_ERROR = feedforward.pitch_angle - euler_.Pitch();
-    const float LAST_PIT_ANGLE_LOOP_OMEGA = pid_pit_angle_.LastOutput();
     // sp=误差、fb=0 与 sp=目标、fb=角度 等价，故 fb_dot 取 +角速度：
     // D 项 -d*fb_dot 作用于实测角速度（微分先行），yaw 同理。
     const float PIT_ANGLE_LOOP_OMEGA =
         pid_pit_angle_.Calculate(PIT_ERROR, 0.0f, gyro_data_.y(), dt_);
     const float TARGET_PIT_OMEGA =
         PIT_ANGLE_LOOP_OMEGA + feedforward.pitch_omega;
-    const float PIT_ALPHA =
-        AngleLoopAlpha(PIT_ANGLE_LOOP_OMEGA, LAST_PIT_ANGLE_LOOP_OMEGA) +
-        feedforward.pitch_alpha;
+    const float PIT_ALPHA = ReferenceAlpha(TARGET_PIT_OMEGA, last_pit_omega_) +
+                            feedforward.pitch_alpha;
     const float PITCH_FEEDFORWARD =
         PARAM.j_pit * PIT_ALPHA -
         PARAM.pit_lc * sinf(euler_.Pitch() + PARAM.pit_theta);
     pid_pit_omega_.SetFeedForward(PITCH_FEEDFORWARD);
     pit_output =
         pid_pit_omega_.Calculate(TARGET_PIT_OMEGA, gyro_data_.y(), dt_);
+    last_pit_omega_ = TARGET_PIT_OMEGA;
 
     if (feedforward.ai_yaw_active) {
       SolveAiYaw(yaw_output);
@@ -678,9 +687,9 @@ class Gimbal {
   }
 
   /**
-   * @brief 角度环输出差分得到的角加速度前馈；dt_ 非法时置 0
+   * @brief Target angular acceleration for inertia feedforward.
    */
-  float AngleLoopAlpha(float omega, float last_omega) const {
+  float ReferenceAlpha(float omega, float last_omega) const {
     if (!std::isfinite(dt_) || dt_ <= 0.0f) {
       return 0.0f;
     }
@@ -690,13 +699,11 @@ class Gimbal {
   void SolvePidYaw(const CycleFeedforward& feedforward, float& yaw_output) {
     const float YAW_ERROR =
         LibXR::CycleValue<float>(feedforward.yaw_angle) - euler_.Yaw();
-    const float LAST_YAW_ANGLE_LOOP_OMEGA = pid_yaw_angle_.LastOutput();
     const float YAW_ANGLE_LOOP_OMEGA =
         pid_yaw_angle_.Calculate(YAW_ERROR, 0.0f, gyro_data_.z(), dt_);
     const float TARGET_YAW_OMEGA = YAW_ANGLE_LOOP_OMEGA + feedforward.yaw_omega;
-    const float YAW_ALPHA =
-        AngleLoopAlpha(YAW_ANGLE_LOOP_OMEGA, LAST_YAW_ANGLE_LOOP_OMEGA) +
-        feedforward.yaw_alpha;
+    const float YAW_ALPHA = ReferenceAlpha(TARGET_YAW_OMEGA, last_yaw_omega_) +
+                            feedforward.yaw_alpha;
     const bool ROTOR_FF_ACTIVE =
         PARAM.rotor_ff_enabled && chassis_motion_state_.online &&
         chassis_motion_state_.yaw_rate_valid &&
@@ -710,6 +717,7 @@ class Gimbal {
     pid_yaw_omega_.SetFeedForward(YAW_FEEDFORWARD);
     yaw_output =
         pid_yaw_omega_.Calculate(TARGET_YAW_OMEGA, gyro_data_.z(), dt_);
+    last_yaw_omega_ = TARGET_YAW_OMEGA;
   }
 
   void SolveAiYaw(float& yaw_output) {
@@ -822,9 +830,10 @@ class Gimbal {
   void PublishVisionTask(uint8_t task) { VisionTaskTopic().Publish(task); }
 
   void SyncGimbalSetpoint(float yaw_rad, float pit_rad) {
-    cmd_data_.yaw = yaw_rad;
-    cmd_data_.pit = pit_rad;
-    cmd_.SetGimbalSetpoint(yaw_rad, pit_rad);
+    target_yaw_cmd_ = yaw_rad;
+    target_pit_cmd_ = pit_rad;
+    last_yaw_omega_ = 0.0f;
+    last_pit_omega_ = 0.0f;
   }
 
   /**
