@@ -12,8 +12,10 @@
 // 云台 Pitch/Yaw 轴 J/B 在线辨识（一次性标定工具）。
 //
 // 被控对象模型（《单轴云台最优控制器设计》第 1 节）：
-//     J * alpha + B * omega + tau_c * tanh(omega / w0) [+ mgl * sin(theta)] =
-//     tau
+//     J * alpha + B * omega + tau_c * tanh(omega / w0)
+//       [+ g_s * sin(theta) + g_c * cos(theta)] = tau
+// 重力项按 [sin, cos] 线性展开：g_s*sin + g_c*cos = M*sin(theta + phi)，
+// 可同时辨识质心力臂与质心偏角（Gimbal 前馈 -pit_lc*sin(theta+pit_theta)）。
 // 激励为开环力矩双向阶跃序列（方波），RLS 带遗忘因子递推估计参数。
 // 本类与 LibXR 完全解耦（仅依赖标准库），可在 PC 端直接实例化做仿真测试。
 
@@ -194,7 +196,7 @@ class SystemIdentify final {
   struct Sensors {
     float yaw_omega_rad_s = 0.0f;
     float pit_omega_rad_s = 0.0f;
-    float pit_theta_rad = 0.0f;  ///< 重力回归项 sin(theta) 用
+    float pit_theta_rad = 0.0f;  ///< 重力回归项 sin/cos(theta) 用
     bool yaw_motor_online = false;
     bool pit_motor_online = false;
     bool rc_online = false;
@@ -205,7 +207,12 @@ class SystemIdentify final {
     float j = 0.0f;
     float b = 0.0f;
     float tau_c = 0.0f;
-    float mgl = 0.0f;  ///< 仅 pitch 有效
+    float gravity_sin = 0.0f;  ///< 仅 pitch 有效：sin(theta) 系数 g_s
+    float gravity_cos = 0.0f;  ///< 仅 pitch 有效：cos(theta) 系数 g_c
+    /// 仅 pitch 有效：换算到 GimbalParam 约定，可直接填入 pit_lc/pit_theta，
+    /// 使 -pit_lc*sin(theta+pit_theta) == g_s*sin(theta) + g_c*cos(theta)。
+    float pit_lc = 0.0f;
+    float pit_theta = 0.0f;
     float residual_var = 0.0f;
     float signal_var = 0.0f;
     float residual_ratio = 0.0f;  ///< 归一化残差（等效 1 - R^2）
@@ -346,7 +353,7 @@ class SystemIdentify final {
 
   const Config config_;
   RlsIdent<3> rls_yaw_;  ///< [J, B, tau_c]
-  RlsIdent<4> rls_pit_;  ///< [J, B, tau_c, mgl]
+  RlsIdent<5> rls_pit_;  ///< [J, B, tau_c, g_s, g_c]
 
   IdentifyState state_ = IdentifyState::IDLE;
   IdentifyAbort abort_reason_ = IdentifyAbort::NONE;
@@ -364,6 +371,8 @@ class SystemIdentify final {
   float coulomb_f2_ = 0.0f;
   float gravity_f1_ = 0.0f;
   float gravity_f2_ = 0.0f;
+  float gravity_cos_f1_ = 0.0f;
+  float gravity_cos_f2_ = 0.0f;
   float alpha_f_ = 0.0f;
   float omega_f2_prev_ = 0.0f;
   float tau_f2_prev_ = 0.0f;
@@ -408,6 +417,8 @@ class SystemIdentify final {
     coulomb_f2_ = 0.0f;
     gravity_f1_ = 0.0f;
     gravity_f2_ = 0.0f;
+    gravity_cos_f1_ = 0.0f;
+    gravity_cos_f2_ = 0.0f;
     alpha_f_ = 0.0f;
     omega_f2_prev_ = 0.0f;
     tau_f2_prev_ = 0.0f;
@@ -493,6 +504,9 @@ class SystemIdentify final {
     const float GRAVITY_RAW = std::sin(sensors.pit_theta_rad);
     gravity_f1_ += LPF_A * (GRAVITY_RAW - gravity_f1_);
     gravity_f2_ += LPF_A * (gravity_f1_ - gravity_f2_);
+    const float GRAVITY_COS_RAW = std::cos(sensors.pit_theta_rad);
+    gravity_cos_f1_ += LPF_A * (GRAVITY_COS_RAW - gravity_cos_f1_);
+    gravity_cos_f2_ += LPF_A * (gravity_cos_f1_ - gravity_cos_f2_);
     alpha_f_ = (omega_f2_ - omega_f2_prev_) / dt_s;
 
     // 双门控：
@@ -522,17 +536,19 @@ class SystemIdentify final {
           return 0.0f;
         }
       } else {
-        const float PHI[4] = {alpha_f_, omega_f2_, coulomb_f2_, gravity_f2_};
-        const float INNOVATION = tau_f2_prev_ - PHI[0] * rls_pit_.Theta(0) -
-                                 PHI[1] * rls_pit_.Theta(1) -
-                                 PHI[2] * rls_pit_.Theta(2) -
-                                 PHI[3] * rls_pit_.Theta(3);
+        const float PHI[5] = {alpha_f_, omega_f2_, coulomb_f2_, gravity_f2_,
+                              gravity_cos_f2_};
+        const float INNOVATION =
+            tau_f2_prev_ - PHI[0] * rls_pit_.Theta(0) -
+            PHI[1] * rls_pit_.Theta(1) - PHI[2] * rls_pit_.Theta(2) -
+            PHI[3] * rls_pit_.Theta(3) - PHI[4] * rls_pit_.Theta(4);
         if (std::fabs(INNOVATION) <= INNOVATION_LIMIT_NM) {
           rls_pit_.Update(PHI, tau_f2_prev_);
           rls_pit_.Project(0, MIN_J_KG_M2, MAX_J_KG_M2);
           rls_pit_.Project(1, 0.0f, MAX_B_NMS_RAD);
           rls_pit_.Project(2, -MAX_TAU_C_NM, MAX_TAU_C_NM);
           rls_pit_.Project(3, -MAX_MGL_NM, MAX_MGL_NM);
+          rls_pit_.Project(4, -MAX_MGL_NM, MAX_MGL_NM);
           AccumulateResidual(INNOVATION, tau_f2_prev_);
         }
         if (!rls_pit_.IsFinite()) {
@@ -572,12 +588,18 @@ class SystemIdentify final {
       result.j = rls_yaw_.Theta(0);
       result.b = rls_yaw_.Theta(1);
       result.tau_c = rls_yaw_.Theta(2);
-      result.mgl = 0.0f;
+      result.gravity_sin = 0.0f;
+      result.gravity_cos = 0.0f;
+      result.pit_lc = 0.0f;
+      result.pit_theta = 0.0f;
     } else {
       result.j = rls_pit_.Theta(0);
       result.b = rls_pit_.Theta(1);
       result.tau_c = rls_pit_.Theta(2);
-      result.mgl = rls_pit_.Theta(3);
+      result.gravity_sin = rls_pit_.Theta(3);
+      result.gravity_cos = rls_pit_.Theta(4);
+      GravityToGimbalParam(result.gravity_sin, result.gravity_cos,
+                           result.pit_lc, result.pit_theta);
     }
     if (update_count_ > 0U) {
       result.residual_var = residual_sq_sum_ / update_count_;
@@ -589,10 +611,31 @@ class SystemIdentify final {
     result.update_count = update_count_;
     // 收敛判据硬化：残差比有限且低于阈值才算收敛——仅按更新次数会把
     // 发散后的垃圾值伪装成成功（实车实测 j=1.97/b=36 仍 converged=1）。
-    result.converged = update_count_ > 0U &&
-                       std::isfinite(result.residual_ratio) &&
-                       result.residual_ratio < CONVERGED_RESIDUAL_RATIO &&
-                       std::isfinite(result.j) && std::isfinite(result.b) &&
-                       std::isfinite(result.tau_c) && std::isfinite(result.mgl);
+    result.converged =
+        update_count_ > 0U && std::isfinite(result.residual_ratio) &&
+        result.residual_ratio < CONVERGED_RESIDUAL_RATIO &&
+        std::isfinite(result.j) && std::isfinite(result.b) &&
+        std::isfinite(result.tau_c) && std::isfinite(result.gravity_sin) &&
+        std::isfinite(result.gravity_cos);
+  }
+
+  /// @brief g_s*sin(theta) + g_c*cos(theta) 换算为 Gimbal 前馈约定
+  /// -pit_lc*sin(theta + pit_theta)：pit_lc*cos(pit_theta) = -g_s，
+  /// pit_lc*sin(pit_theta) = -g_c。(lc, phi) 与 (-lc, phi±pi) 等价，
+  /// 取 pit_theta ∈ (-pi/2, pi/2]，使其保持"质心偏角"的小角度含义，
+  /// 符号差异全部由 pit_lc 承载。
+  static void GravityToGimbalParam(float gravity_sin, float gravity_cos,
+                                   float& pit_lc, float& pit_theta) {
+    constexpr float HALF_PI = static_cast<float>(LibXR::PI) * 0.5f;
+    constexpr float PI_F = static_cast<float>(LibXR::PI);
+    pit_lc = std::hypot(gravity_sin, gravity_cos);
+    pit_theta = std::atan2(-gravity_cos, -gravity_sin);
+    if (pit_theta > HALF_PI) {
+      pit_theta -= PI_F;
+      pit_lc = -pit_lc;
+    } else if (pit_theta <= -HALF_PI) {
+      pit_theta += PI_F;
+      pit_lc = -pit_lc;
+    }
   }
 };

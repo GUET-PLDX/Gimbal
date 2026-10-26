@@ -1,11 +1,14 @@
 // SystemIdentify PC 端仿真回归测试。
 //
-// 虚拟被控对象：J*alpha + B*omega + tau_c*tanh(omega/w0) [+ mgl*sin(theta)] =
-// tau 与 SystemIdentify 的回归模型同构，验证：
+// 虚拟被控对象：J*alpha + B*omega + tau_c*tanh(omega/w0)
+//   [+ mgl*sin(theta + phase)] = tau
+// 与 SystemIdentify 的回归模型同构（重力项展开为 sin/cos 线性组合），验证：
 //   1. 无噪声：yaw/pitch 辨识值与真值相对误差 < 2%
 //   2. 含噪声（陀螺测量噪声 0.02 rad/s 峰值均匀分布）：< 10%
 //   3. 变异验证：编译期定义 SYSID_MUTATE_J 把对象惯量改为 1.5 倍而期望不变，
 //      测试必须失败（证明断言对 J 敏感，能捕获原始失效模式）。
+//   4. pitch 质心偏角 phase != 0：换算出的 pit_lc/pit_theta 代入 Gimbal 前馈
+//      -pit_lc*sin(theta+pit_theta) 后须复现真实重力矩。
 //
 // 构建运行见 system_identify_host_regression.sh。
 
@@ -34,11 +37,12 @@ struct Plant {
   double b;
   double tau_c;
   double mgl;
+  double phase;
   double omega = 0.0;
   double theta = 0.0;
 
   void Step(double tau, bool pitch) {
-    const double GRAVITY = pitch ? mgl * std::sin(theta) : 0.0;
+    const double GRAVITY = pitch ? mgl * std::sin(theta + phase) : 0.0;
     const double ACC =
         (tau - b * omega - tau_c * std::tanh(omega / PLANT_W0) - GRAVITY) / j;
     omega += ACC * DT_S;
@@ -51,6 +55,7 @@ struct Truth {
   double b;
   double tau_c;
   double mgl;
+  double phase;
 };
 
 using AxisResultOut = SystemIdentify::AxisResult;
@@ -71,7 +76,7 @@ bool RunIdentification(const SystemIdentify::Config& config, bool pitch_axis,
                        AxisResultOut& result) {
   SystemIdentify sysid(config);
   sysid.Begin();
-  Plant plant{truth.j, truth.b, truth.tau_c, truth.mgl};
+  Plant plant{truth.j, truth.b, truth.tau_c, truth.mgl, truth.phase};
   Lcg lcg;
 
   SystemIdentify::Sensors sensors{};
@@ -119,7 +124,38 @@ bool CheckTruth(const AxisResultOut& result, const Truth& truth, double rel_tol,
   ok &= NearlyEqual(result.b, truth.b, rel_tol, "B");
   ok &= NearlyEqual(result.tau_c, truth.tau_c, rel_tol, "tau_c");
   if (pitch_axis) {
-    ok &= NearlyEqual(result.mgl, truth.mgl, rel_tol, "mgl");
+    // 重力系数：g_s = M*cos(phase)，g_c = M*sin(phase)。分量可能接近 0，
+    // 按幅值 M 归一化做绝对误差比较。
+    const double G_SIN = truth.mgl * std::cos(truth.phase);
+    const double G_COS = truth.mgl * std::sin(truth.phase);
+    const double G_ERR =
+        std::hypot(result.gravity_sin - G_SIN, result.gravity_cos - G_COS) /
+        truth.mgl;
+    if (G_ERR > rel_tol) {
+      std::printf(
+          "FAIL: gravity g_s=%.6g g_c=%.6g expected %.6g/%.6g "
+          "rel_err=%.4f > %.4f\n",
+          result.gravity_sin, result.gravity_cos, G_SIN, G_COS, G_ERR, rel_tol);
+      ok = false;
+    }
+    // 换算到 Gimbal 前馈约定后须在全角度上复现重力矩（含符号）。
+    for (double theta = -1.0; theta <= 1.0; theta += 0.25) {
+      const double FF = -result.pit_lc * std::sin(theta + result.pit_theta);
+      const double REAL = truth.mgl * std::sin(theta + truth.phase);
+      if (std::fabs(FF - REAL) > rel_tol * truth.mgl) {
+        std::printf(
+            "FAIL: pit_lc=%.6g pit_theta=%.6g ff(%.2f)=%.6g "
+            "real=%.6g\n",
+            result.pit_lc, result.pit_theta, theta, FF, REAL);
+        ok = false;
+        break;
+      }
+    }
+    if (std::fabs(result.pit_theta) > 0.5 * M_PI + 1e-6) {
+      std::printf("FAIL: pit_theta=%.6g outside (-pi/2, pi/2]\n",
+                  result.pit_theta);
+      ok = false;
+    }
   }
   if (result.residual_ratio > 0.05f) {
     std::printf("FAIL: residual_ratio=%.4f > 0.05\n", result.residual_ratio);
@@ -134,11 +170,12 @@ int Run() {
   // ---- yaw 轴：无噪声 ----
   {
 #ifdef SYSID_MUTATE_J
-    const Truth TRUTH{0.04373488 * 1.5, 0.02, 0.03, 0.0};  // 变异：J 偏移 50%
+    const Truth TRUTH{0.04373488 * 1.5, 0.02, 0.03, 0.0,
+                      0.0};  // 变异：J 偏移 50%
 #else
-    const Truth TRUTH{0.04373488, 0.02, 0.03, 0.0};
+    const Truth TRUTH{0.04373488, 0.02, 0.03, 0.0, 0.0};
 #endif
-    const Truth EXPECTED{0.04373488, 0.02, 0.03, 0.0};
+    const Truth EXPECTED{0.04373488, 0.02, 0.03, 0.0, 0.0};
     AxisResultOut result{};
     if (!RunIdentification(MakeConfig(IdentifyAxis::YAW_ONLY), false, TRUTH,
                            0.0, result)) {
@@ -152,7 +189,7 @@ int Run() {
 
   // ---- yaw 轴：含噪声 ----
   {
-    const Truth TRUTH{0.04373488, 0.02, 0.03, 0.0};
+    const Truth TRUTH{0.04373488, 0.02, 0.03, 0.0, 0.0};
     AxisResultOut result{};
     if (!RunIdentification(MakeConfig(IdentifyAxis::YAW_ONLY), false, TRUTH,
                            0.02, result)) {
@@ -165,29 +202,44 @@ int Run() {
 
   // ---- pitch 轴：无噪声，含重力项 ----
   // 真值选取保证激励下 |omega| 不触 omega_abort_pit：
-  // omega_ss ≈ (0.2 - 0.02 - 0.1*sin(theta))/0.1 ≈ 1.6 rad/s。
-  {
-    const Truth TRUTH{0.014, 0.1, 0.02, 0.1};
+  // omega_ss ≈ (0.2 - 0.02 - 0.1*sin(theta+phase))/0.1 ≈ 1.6 rad/s。
+  // phase=0 退化为原 mgl*sin 模型；phase!=0 覆盖质心偏角（cos 项非零）。
+  // 含噪容差 15%：pitch 的 tau_c 小（0.02），陀螺噪声下 tau_c 约 -10% 的
+  // 偏差在引入 cos 项之前的 4 维模型上同样存在（实测 0.01796），非本项引入。
+  const struct {
+    Truth truth;
+    double noise;
+    double tol;
+    const char* name;
+  } PITCH_CASES[] = {
+      {{0.014, 0.1, 0.02, 0.1, 0.0}, 0.0, 0.02, "pitch noiseless"},
+      {{0.014, 0.1, 0.02, 0.1, 0.3}, 0.0, 0.02, "pitch phase+0.3"},
+      {{0.014, 0.1, 0.02, 0.1, -0.2}, 0.02, 0.15, "pitch noisy-0.2"},
+  };
+  for (const auto& pitch_case : PITCH_CASES) {
     AxisResultOut result{};
-    if (!RunIdentification(MakeConfig(IdentifyAxis::PITCH_ONLY), true, TRUTH,
-                           0.0, result)) {
+    if (!RunIdentification(MakeConfig(IdentifyAxis::PITCH_ONLY), true,
+                           pitch_case.truth, pitch_case.noise, result)) {
       return 1;
     }
-    ok &= CheckTruth(result, TRUTH, 0.02, true);
+    ok &= CheckTruth(result, pitch_case.truth, pitch_case.tol, true);
     std::printf(
-        "pitch noiseless: J=%.6f B=%.5f tau_c=%.5f mgl=%.5f ratio=%.4f\n",
-        result.j, result.b, result.tau_c, result.mgl, result.residual_ratio);
+        "%s: J=%.6f B=%.5f tau_c=%.5f g_s=%.5f g_c=%.5f pit_lc=%.5f "
+        "pit_theta=%.4f ratio=%.4f\n",
+        pitch_case.name, result.j, result.b, result.tau_c, result.gravity_sin,
+        result.gravity_cos, result.pit_lc, result.pit_theta,
+        result.residual_ratio);
   }
 
   // ---- 故障注入：dt 毛刺不得污染估计 ----
   // 调度追赶导致 dt 远小于 1ms 时，alpha=差分/dt 会爆炸（实车残余溢出 inf
   // 的根因之一）。MIN_DT_S 钳制后结果必须保持在容差内。
   {
-    const Truth TRUTH{0.04373488, 0.02, 0.03, 0.0};
+    const Truth TRUTH{0.04373488, 0.02, 0.03, 0.0, 0.0};
     SystemIdentify::Config config = MakeConfig(IdentifyAxis::YAW_ONLY);
     SystemIdentify sysid(config);
     sysid.Begin();
-    Plant plant{TRUTH.j, TRUTH.b, TRUTH.tau_c, TRUTH.mgl};
+    Plant plant{TRUTH.j, TRUTH.b, TRUTH.tau_c, TRUTH.mgl, TRUTH.phase};
     SystemIdentify::Sensors sensors{};
     sensors.rc_online = true;
     sensors.yaw_motor_online = true;
@@ -219,11 +271,11 @@ int Run() {
 
   // ---- 故障注入：陀螺野值（大幅值 + NaN）不得发散 ----
   {
-    const Truth TRUTH{0.04373488, 0.02, 0.03, 0.0};
+    const Truth TRUTH{0.04373488, 0.02, 0.03, 0.0, 0.0};
     SystemIdentify::Config config = MakeConfig(IdentifyAxis::YAW_ONLY);
     SystemIdentify sysid(config);
     sysid.Begin();
-    Plant plant{TRUTH.j, TRUTH.b, TRUTH.tau_c, TRUTH.mgl};
+    Plant plant{TRUTH.j, TRUTH.b, TRUTH.tau_c, TRUTH.mgl, TRUTH.phase};
     SystemIdentify::Sensors sensors{};
     sensors.rc_online = true;
     sensors.yaw_motor_online = true;
@@ -273,7 +325,7 @@ int Run() {
     SystemIdentify::Config config = MakeConfig(IdentifyAxis::YAW_ONLY);
     SystemIdentify sysid(config);
     sysid.Begin();
-    Plant plant{0.04373488, 0.02, 0.03, 0.0};
+    Plant plant{0.04373488, 0.02, 0.03, 0.0, 0.0};
     SystemIdentify::Sensors sensors{};
     sensors.rc_online = true;
     sensors.yaw_motor_online = true;
