@@ -4,10 +4,10 @@
 /* === MODULE MANIFEST V2 ===
 module_description: No description provided
 depends:
-- pldx/CMD@master
-- pldx/Motor@master
-- pldx/BMI088@master
-- pldx/DualBoard@master
+- pldx/CMD@mc02-static
+- pldx/Motor@mc02-static
+- pldx/BMI088@mc02-static
+- pldx/DualBoard@mc02-static
 === END MANIFEST === */
 // clang-format on
 
