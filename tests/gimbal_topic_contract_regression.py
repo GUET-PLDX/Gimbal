@@ -1,4 +1,5 @@
 import argparse
+import json
 import pathlib
 import re
 
@@ -13,6 +14,13 @@ CONFIG_NAMES = (
     "omni_infantry_3",
     "omni_infantry_4",
 )
+
+
+def topic_name(value):
+    # XRobot arguments may contain a C++ string literal, unlike defaults.
+    if isinstance(value, str) and value.startswith('"') and value.endswith('"'):
+        return json.loads(value)
+    return value
 
 
 def find_module(modules, module_name, config_name):
@@ -41,15 +49,31 @@ param_defaults = {
     "gyro_topic_name": "gimbal_gyro",
     "gimbal_cmd_topic_name": "gimbal_cmd",
 }
-param_block = re.search(r"struct GimbalParam\s*\{(.*?)\n\s*\};", source, re.S).group(1)
-param_fields = re.findall(r"^\s*[^;=]+?\s+(\w+)\s*=", param_block, re.M)
-for field, default in (
-    ("euler_topic_name", "gimbal_euler"),
-    ("gyro_topic_name", "gimbal_gyro"),
-    ("gimbal_cmd_topic_name", "gimbal_cmd"),
-):
-    if param_defaults.get(field) != default or f'{field} = "{default}";' not in param_block:
-        failures.append(f"GimbalParam default mismatch: {field}")
+param_block = re.search(r"struct Param\s*\{(.*?)\n\s*\};", source, re.S).group(1)
+# Param 只声明字段，默认值全部由构造函数默认实参给出。
+if "=" in param_block:
+    failures.append("Param must declare fields only, defaults live in the constructor")
+param_fields = re.findall(r"^\s*[^;=]+?\s+(\w+)\s*;", param_block, re.M)
+
+
+def braced_block(text, start):
+    # 默认实参里含嵌套聚合，需按括号配对取整段。
+    opening = text.index("{", start)
+    depth = 0
+    for index in range(opening, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[opening : index + 1]
+    raise ValueError("unbalanced Param default initializer")
+
+
+defaults_block = braced_block(source, source.index("const Param& param ="))
+for field in param_defaults:
+    if f'.{field} = "{param_defaults[field]}"' not in defaults_block:
+        failures.append(f"Param default mismatch: {field}")
 
 for config_name in config_names:
     config_path = config_root / f"{config_name}.yaml"
@@ -65,12 +89,15 @@ for config_name in config_names:
         continue
 
     bmi088_args = {k: v for item in bmi088.get("args", []) for k, v in item.items()}
+    bmi088_args = bmi088_args.get("param", bmi088_args)
     madgwick_args = {k: v for item in madgwick.get("args", []) for k, v in item.items()}
     gimbal_args = {k: v for item in gimbal.get("args", []) for k, v in item.items()}
-    gimbal_param = gimbal_args.get("GimbalParam", gimbal_args.get("gimbal_param", {}))
-    if list(gimbal_param) != param_fields[: len(gimbal_param)]:
-        failures.append(f"{config_name}: GimbalParam positional field order mismatch")
-    gimbal_topics = param_defaults | gimbal_param
+    gimbal_param = gimbal_args.get("param", {})
+    if list(gimbal_param) != param_fields:
+        failures.append(f"{config_name}: Param positional field order mismatch")
+    gimbal_topics = {
+        key: topic_name(value) for key, value in (param_defaults | gimbal_param).items()
+    }
     required = (
         ("BMI088", bmi088_args, "gyro_topic_name"),
         ("MadgwickAHRS", madgwick_args, "gyro_topic_name"),
@@ -87,9 +114,9 @@ for config_name in config_names:
         )
         continue
 
-    bmi088_gyro = bmi088_args["gyro_topic_name"]
-    madgwick_gyro = madgwick_args["gyro_topic_name"]
-    madgwick_euler = madgwick_args["euler_topic_name"]
+    bmi088_gyro = topic_name(bmi088_args["gyro_topic_name"])
+    madgwick_gyro = topic_name(madgwick_args["gyro_topic_name"])
+    madgwick_euler = topic_name(madgwick_args["euler_topic_name"])
     if madgwick_gyro != bmi088_gyro:
         failures.append(
             f"{config_name}: Madgwick gyro {madgwick_gyro!r} != "
@@ -108,7 +135,7 @@ for config_name in config_names:
     cmd_topic = {k: v for item in cmd.get("args", []) for k, v in item.items()}.get(
         "gimbal_cmd_topic_name", "gimbal_cmd"
     )
-    if cmd_topic != gimbal_topics["gimbal_cmd_topic_name"]:
+    if topic_name(cmd_topic) != gimbal_topics["gimbal_cmd_topic_name"]:
         failures.append(f"{config_name}: Gimbal command Topic differs from CMD")
 
 if failures:

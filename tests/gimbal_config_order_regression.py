@@ -10,7 +10,7 @@ import yaml
 MODULE_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROOT = MODULE_ROOT.parent.parent
 # xrobot 1.0 matches the ordered argument names to the C++ constructor.
-GIMBAL_PARAM_KEY = "gimbal_param"
+GIMBAL_PARAM_KEY = "param"
 PATROL_KEYS = (
     "patrol_pitch_amplitude_rad",
     "patrol_pitch_angular_rate_rad_s",
@@ -24,31 +24,6 @@ PATROL_VALUES = {
 LEGACY_PATROL_KEYS = {"patrol_range", "patrol_omega"}
 
 
-EXPECTED_FIELDS = (
-    "k_theta",
-    "k_omega",
-    "k_i",
-    "theta_integral_limit_rad_s",
-    "tau_coulomb_nm",
-    "coulomb_smooth_rad_s",
-    "eso_bandwidth_rad_s",
-    "eso_comp_gain",
-    "eso_comp_limit_nm",
-    "eso_omega_gate_rad_s",
-    "eso_alpha_gate_rad_s2",
-    "tau_bias_ki",
-    "tau_bias_limit_nm",
-    "tau_meas_lpf_alpha",
-    "theta_deadband_rad",
-    "torque_soft_limit_nm",
-    "torque_slew_rate_nm_s",
-    "eso_enable",
-    "eso_comp_enable",
-    "coulomb_enable",
-    "lqi_enable",
-    "torque_bias_enable",
-    "torque_slew_enable",
-)
 
 SMC_EXPECTED_FIELDS = (
     "c",
@@ -126,36 +101,10 @@ SYSID_EXPECTED_DEFAULTS = {
     "axis_timeout_s": 30.0,
 }
 
-EXPECTED_DEFAULTS = {
-    "k_theta": 1.0,
-    "k_omega": 1.0,
-    "k_i": 0.2,
-    "theta_integral_limit_rad_s": 0.5,
-    "tau_coulomb_nm": 0.05,
-    "coulomb_smooth_rad_s": 0.2,
-    "eso_bandwidth_rad_s": 30.0,
-    "eso_comp_gain": 1.0,
-    "eso_comp_limit_nm": 0.3,
-    "eso_omega_gate_rad_s": 5.0,
-    "eso_alpha_gate_rad_s2": 50.0,
-    "tau_bias_ki": 0.5,
-    "tau_bias_limit_nm": 0.15,
-    "tau_meas_lpf_alpha": 0.1,
-    "theta_deadband_rad": 0.0,
-    "torque_soft_limit_nm": 2.0,
-    "torque_slew_rate_nm_s": 1000.0,
-    "eso_enable": True,
-    "eso_comp_enable": False,
-    "coulomb_enable": False,
-    "lqi_enable": False,
-    "torque_bias_enable": False,
-    "torque_slew_enable": True,
-}
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--header", default=MODULE_ROOT / "Gimbal.hpp")
-parser.add_argument("--algorithm", default=MODULE_ROOT / "YawLqrEso.hpp")
 parser.add_argument("--smc-algorithm", default=MODULE_ROOT / "YawSmc.hpp")
 parser.add_argument("--sysid-algorithm", default=MODULE_ROOT / "SystemIdentify.hpp")
 parser.add_argument(
@@ -246,9 +195,6 @@ def check_cpp_defaults(defaults, expected, label):
         elif actual_value != expected_value:
             raise SystemExit(f"{label} C++ Config default mismatch: {key}")
 
-lqr_fields = config_fields(pathlib.Path(args.algorithm).read_text(), "Config")
-if lqr_fields != EXPECTED_FIELDS:
-    raise SystemExit("LQR Config order mismatch")
 smc_fields = config_fields(pathlib.Path(args.smc_algorithm).read_text(), "Config")
 if smc_fields != SMC_EXPECTED_FIELDS:
     raise SystemExit("SMC Config order mismatch")
@@ -256,11 +202,6 @@ if smc_fields != SMC_EXPECTED_FIELDS:
 header = pathlib.Path(args.header).read_text()
 # C++ 结构体默认值必须逐字段等于 manifest 默认值：两者分叉会让"省略键就用默认值"
 # 这件事失真（曾经 C++ 侧全零、manifest 侧是正增益，全零配置能通过校验 → 静默零增益）。
-check_cpp_defaults(
-    config_defaults(pathlib.Path(args.algorithm).read_text(), "Config"),
-    EXPECTED_DEFAULTS,
-    "LQR",
-)
 check_cpp_defaults(
     config_defaults(pathlib.Path(args.smc_algorithm).read_text(), "Config"),
     SMC_EXPECTED_DEFAULTS,
@@ -294,17 +235,12 @@ if not args.header_only:
     target_gimbal_param = gimbal_args[GIMBAL_PARAM_KEY]
     if target_gimbal_param.get("yaw_manual_controller") != "YawManualController::SMC":
         raise SystemExit("sentry gimbal YAML must select SMC for manual Yaw")
-    if target_gimbal_param.get("yaw_ai_controller") != "YawAiController::SMC":
-        raise SystemExit("sentry gimbal YAML must select SMC for AI Yaw")
-    yaw_yaml = gimbal_args["yaw_lqr_eso"]
-    if "j_kg_m2" in yaw_yaml:
-        raise SystemExit("target YAML must not duplicate the Gimbal j_yaw parameter")
-    if tuple(yaw_yaml.keys()) != EXPECTED_FIELDS:
-        raise SystemExit("YAML order mismatch")
-    smc_yaml = gimbal_args["yaw_smc"]
+    if {"yaw_lqr_eso", "ai_yaw_lqr_eso_enable"} & set(gimbal_args) or {"yaw_ai_controller", "rotor_ff_enabled"} & set(target_gimbal_param):
+        raise SystemExit("removed LQR/ESO or rotor feedforward parameters remain in target YAML")
+    smc_yaml = target_gimbal_param["yaw_smc"]
     if tuple(smc_yaml.keys()) != SMC_EXPECTED_FIELDS:
         raise SystemExit("SMC YAML order mismatch")
-    sysid_yaml = gimbal_args["system_identify"]
+    sysid_yaml = target_gimbal_param["system_identify"]
     if tuple(sysid_yaml.keys()) != SYSID_EXPECTED_FIELDS:
         raise SystemExit("SYSID YAML order mismatch")
     if sysid_yaml.get("enabled") is not False:
@@ -316,22 +252,17 @@ if not args.header_only:
                 return "true" if value else "false"
             return str(value)
 
-        expected = "{" + ",".join(cpp(yaw_yaml[key]) for key in EXPECTED_FIELDS) + "}"
-        smc_expected = (
-            "{" + ",".join(cpp(smc_yaml[key]) for key in SMC_EXPECTED_FIELDS) + "}"
+        def designated(mapping, fields):
+            return ",".join(f".{key}={cpp(mapping[key])}" for key in fields)
+
+        smc_expected = designated(smc_yaml, SMC_EXPECTED_FIELDS)
+        sysid_expected = designated(sysid_yaml, SYSID_EXPECTED_FIELDS)
+        generated = re.sub(
+            r"^\s*#line.*$", "", pathlib.Path(args.generated).read_text(), flags=re.M
         )
-        sysid_expected = (
-            "{"
-            + ",".join(cpp(sysid_yaml[key]) for key in SYSID_EXPECTED_FIELDS)
-            + "}"
-        )
-        generated = re.sub(r"\s+", "", pathlib.Path(args.generated).read_text())
-        if expected not in generated:
-            raise SystemExit("generated aggregate and Topic suffix mismatch")
+        generated = re.sub(r"\s+", "", generated)
         if "YawManualController::SMC" not in generated:
             raise SystemExit("generated manual controller enum mismatch")
-        if "YawAiController::SMC" not in generated:
-            raise SystemExit("generated AI controller enum mismatch")
         if smc_expected not in generated:
             raise SystemExit("generated SMC aggregate mismatch")
         if sysid_expected not in generated:

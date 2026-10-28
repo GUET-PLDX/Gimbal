@@ -120,17 +120,11 @@ jobs:
         run: |
           pip3 install xrobot libxr
 
-      - name: Install regression dependencies
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends ripgrep
-
       - name: Run Gimbal regression tests
         working-directory: Modules/${{ env.XR_MODULE_NAME }}
         run: |
-          python3 tests/parse_cmd_behavior_regression.py --header Gimbal.hpp
-          python3 tests/parse_cmd_behavior_regression.py --header Gimbal.hpp --negative-checks
-          tests/ai_yaw_integration_regression.sh
+          bash tests/yaw_smc_host_regression.sh
+          bash tests/system_identify_host_regression.sh
 
       - name: Run xrobot_setup
         run: |

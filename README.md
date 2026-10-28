@@ -33,38 +33,12 @@ tau_smc = J * (-surface_dot_term - epsilon * Sat(s) - k * s)
 
 运行时保留参考代码的宽松 `p/q` 行为，不增加奇数校验。修复参考运动学与 FTSMC 负误差方向后，移动目标和负方向输出会与旧实现不同。升级后应重新执行正负角度阶跃、匀速目标和加速目标测试，再进行实车参数整定。
 
-### Yaw 控制器配置归属（Config Embedding）
+### Yaw 控制器配置
 
-`YawSmc` 与 `YawLqrEso` 各自持有一份 `const Config config_`：配置在**构造期锁存、运行期只读**，`Calculate()` 不再接收 `Config` 形参。被控对象参数（`j_yaw` / `yaw_k` / 硬限幅 `pid_yaw_omega.OutLimit()`）仍按调用传入，**不进入 `Config`**。
-
-```cpp
-YawSmc yaw_smc{config};                       // 配置随实例一起构造
-yaw_smc.Calculate(reference, feedback, dt_s, j_kg_m2);
-```
-
-升级时需要注意的语义变化：
-
-1. 两个控制器**不再有默认构造**，也不再可拷贝/移动赋值（实例内含 `const` 成员）。`Gimbal` 的成员因此从 4 个（`*_config_` + 控制器）收敛为 2 个。
-2. **不再支持运行期更换配置**。原先 7 个 `previous_*_enable_` 边沿标志已删除，其中 `eso_comp` / `coulomb` / `lqi` 三个本来就是只写不读的死成员。替代物是 `slew_primed_` / `bias_primed_` 两个「首周期播种」标志；ESO 的首周期初始化仍由既有的 `observer_fresh_` 承担（构造期 `Reset(0,0,0)` 会置位）。相应地，"运行期禁用再重新使能某功能"的场景不存在了，原先覆盖这些下降沿/再入沿的测试改为按配置拆分实例，断言值不变。
-3. `Gimbal` 在构造期用 `REQUIRE(Yaw*::ValidateConfig(...))` 校验锁存配置，**校验失败会打印 `Fatal error at file:line` 并永久挂起**，不再像以前那样在运行期静默输出零力矩。校验放在初始化列表的 `CheckedSmcConfig()` / `CheckedLqrEsoConfig()` 内，保证早于控制线程启动；`REQUIRE` 只允许出现在 `Gimbal.hpp`（主机测试不链接 `libxr_fatal_error`）。
-4. 这些改动**没有内存收益**（配置总得存在某处），收益是「配置 + 状态」单一归属，以及整体删除一套边沿状态机。
-
-### 配置默认值的归属约定
-
-同一份 `Config` 有两处「默认值」，角色不同、且**必须一致**：
-
-| 位置 | 角色 | 谁守护 |
-| --- | --- | --- |
-| `Gimbal.hpp` manifest 里 `yaw_lqr_eso` / `yaw_smc` 块的取值 | **建议基线**（IDE/CubeMX 展示、生成 YAML 的初值）。**不是实车整定值** | `tests/gimbal_config_order_regression.py` 校验字段顺序 + 取值 |
-| `YawSmc::Config` / `YawLqrEso::Config` 的成员默认值 | 必须**逐字段等于**上面的建议基线，因此 `Config{}` 是**可用**配置，不是全零哨兵 | 同一脚本逐字段比对（`static_assert` 读不到 YAML，故用 Python 守护；对浮点按 float32 归一化比较） |
-
-配套两条硬约束：
-
-1. **`Gimbal` 的 `yaw_lqr_eso` / `yaw_smc` 形参没有默认实参。** `xrobot_gen_main` 按位置展开 `constructor_args`，YAML 漏掉某个键时它会**丢弃该实参**而不是回退到 manifest 默认值，导致其后实参整体左移（实测：省掉 `yaw_lqr_eso` 会把 `yaw_smc` 的聚合值喂给 `yaw_lqr_eso`）。让最后一个形参没有默认值，"漏键"就从静默错配变成**编译错误**。
-2. **`k_theta` / `k_omega` 必须严格为正**（`YawSmc` 侧对应 `c > 0`）。两者同时为 0 时角度环与角速度环一起失效、控制器静默输出零力矩——"配置被整块清零 / 聚合实参被截断"恰好是这个形状。这是上电校验（`REQUIRE`）能拦住的最后一道防线。
+`YawSmc` 在构造期锁存 `const Config config_`，`Calculate()` 只接收参考、反馈、`dt` 和 `j_yaw`。`Gimbal` 在初始化列表中用 `REQUIRE(YawSmc::ValidateConfig(...))` 校验配置，失败时在控制线程启动前挂起。`YawSmc::Config` 的成员默认值须与 `Gimbal.hpp` 中 `yaw_smc` 的默认实参一致，由 `tests/gimbal_config_order_regression.py` 校验。
 
 ## 2. 主要函数说明
-1. ThreadFunc: 云台控制主线程。
+1. ThreadFunc: 云台控制主线程，也是 CMD 的唯一运行任务；每轮依次 UpdateInputs、读取本次命令、解释参考并控制电机。
 2. ParseCMD: 解析 CMD 输入并更新目标。
 3. Control: 角度环与角速度环计算控制输出。
 4. Update: 刷新电机反馈并发布状态。
@@ -74,21 +48,20 @@ yaw_smc.Calculate(reference, feedback, dt_s, j_kg_m2);
 ## 3. 接入步骤
 1. 添加模块并绑定 motor_roll、motor_yaw、cmd。
 2. 配置零位、限位、惯量与 PID 参数。
-3. 手动和自瞄共用同一套 Yaw 算法实例。`yaw_manual_controller` 选 PID 或 SMC，`yaw_ai_controller` 选 SMC 或 LQR/ESO。`gimbal_cmd` 的 yaw/pit 已是绝对角（操作手积分在 CMD 完成，自瞄为视觉轨迹）。
+3. 手动和自瞄共用同一套 Yaw 算法实例。`yaw_manual_controller` 选 PID 或 SMC，自瞄固定使用 SMC。`gimbal_cmd` 的 yaw/pit 已是绝对角（操作手积分在 CMD 完成，自瞄为视觉轨迹）。
 4. 先验证模式切换，再联调控制参数。首次启用滑模时降低 `yaw_smc.torque_soft_limit_nm`，确认力矩极性后再抬升。
 
 云台姿态输入 topic：
 - `gimbal_cmd`：CMD 发布的云台控制命令。
 - `gimbal_euler`：云台 IMU 融合后的欧拉角。
 - `gimbal_gyro`：云台 IMU 原始角速度。
-- `chassis_motion_state`：底盘运动状态（在线、模式、yaw 角速度），供小陀螺模式前馈使用。
 
-前三个输入名称由 `GimbalParam` 的 `gimbal_cmd_topic_name`、`euler_topic_name`、
-`gyro_topic_name` 配置，默认值如上。YAML 按位置展开聚合参数，三个字段应按
-`euler_topic_name`、`gyro_topic_name`、`gimbal_cmd_topic_name` 的顺序追加在
-`yaw_ai_controller` 后。Topic 名称字符串必须在模块运行期间保持有效，推荐使用
-YAML 字符串或 C++ 字符串字面量；订阅名必须与发布者一致。构造期通过 `REQUIRE`
-检查电机指针及非空 Topic 名称，失败时在控制线程启动前报错并挂起。
+前三个输入名称由 `Gimbal::Param` 的 `gimbal_cmd_topic_name`、`euler_topic_name`、
+`gyro_topic_name` 配置，默认值如上。整个 `Param` 是一个完整映射：YAML 的 `param`
+键须与结构体字段同名同序（xrobot 在生成期校验），三个 Topic 字段排在
+`system_identify` 之后。Topic 名称字符串必须在模块运行期间保持有效，推荐使用
+YAML 字符串或 C++ 字符串字面量；订阅名必须与发布者一致。构造期不校验电机指针与
+Topic 名称，配置错误会在控制线程首次使用时暴露。
 
 云台状态输出 topic：
 - `yawmotor_angle` / `pitchmotor_angle`：电机绝对角，rad。
@@ -103,74 +76,95 @@ YAML 字符串或 C++ 字符串字面量；订阅名必须与发布者一致。�
 ## 4. 配置示例（YAML）
 module: Gimbal
 entry_header: Modules/Gimbal/Gimbal.hpp
-constructor_args:
-  - cmd: '@cmd'
-  - task_stack_depth: 2048
-  - pid_yaw_angle:
-      k: 0.0
-      p: 0.0
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 0.0
-      cycle: true
-  - pid_yaw_omega:
-      k: 0.0
-      p: 0.0
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 0.0
-      cycle: true
-  - pid_roll_angle:
-      k: 0.0
-      p: 0.0
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 0.0
-      cycle: false
-  - pid_roll_omega:
-      k: 0.0
-      p: 0.0
-      i: 0.0
-      d: 0.0
-      i_limit: 0.0
-      out_limit: 0.0
-      cycle: false
-  - motor_roll: '@&motor_roll'
-  - motor_yaw: '@&motor_yaw'
-  - roll_max_angle: 0.0
-  - roll_min_angle: 0.0
-  - roll_lc: 0.0
-  - roll_theta: 0.0
-  - yaw_k: 0.0
-  - j_roll: 0.0
-  - j_yaw: 0.0
-  - roll_zero: 0.0
-  - yaw_zero: 0.0
-  - patrol_range: 0.0
-  - patrol_omega: 0.0
-  - roll_reverse_flag: false
-  - thread_priority: LibXR::Thread::Priority::MEDIUM
-  - rotor_ff_enabled: false
-  - yaw_manual_controller: YawManualController::PID
-  - yaw_ai_controller: YawAiController::LQR_ESO
-  - yaw_smc:
-      c: 20.0
-      k: 120.0
-      epsilon: 0.5
-      q: 21.0
-      p: 27.0
-      error_deadband_rad: 0.0
-      ftsmc_switch_rad: 0.017453292519943295
-      sat_boundary: 1.0
-      torque_soft_limit_nm: 2.0
-      torque_min_nm: -2.223
-      torque_max_nm: 2.223
-      torque_slew_rate_nm_s: 1000.0
-      ftsmc_enable: true
-      torque_slew_enable: true
+args:
+  - cmd: cmd
+  - motor_pit: motor_pit
+  - motor_yaw: motor_yaw
+  - param:
+      task_stack_depth: 2048
+      pid_yaw_angle:
+        k: 0.0
+        p: 0.0
+        i: 0.0
+        d: 0.0
+        i_limit: 0.0
+        out_limit: 0.0
+        cycle: true
+      pid_yaw_omega:
+        k: 0.0
+        p: 0.0
+        i: 0.0
+        d: 0.0
+        i_limit: 0.0
+        out_limit: 0.0
+        cycle: true
+      pid_pit_angle:
+        k: 0.0
+        p: 0.0
+        i: 0.0
+        d: 0.0
+        i_limit: 0.0
+        out_limit: 0.0
+        cycle: false
+      pid_pit_omega:
+        k: 0.0
+        p: 0.0
+        i: 0.0
+        d: 0.0
+        i_limit: 0.0
+        out_limit: 0.0
+        cycle: false
+      pit_max_angle: 0.0
+      pit_min_angle: 0.0
+      pit_lc: 0.0
+      pit_theta: 0.0
+      yaw_k: 0.0
+      j_pit: 0.0
+      j_yaw: 0.0
+      pit_zero: 0.0
+      yaw_zero: 0.0
+      patrol_pitch_amplitude_rad: 0.0
+      patrol_pitch_angular_rate_rad_s: 0.0
+      patrol_yaw_rate_rad_s: 0.0
+      reverse_flag: false
+      thread_priority: LibXR::Thread::Priority::MEDIUM
+      yaw_manual_controller: YawManualController::PID
+      yaw_smc:
+        c: 20.0
+        k: 120.0
+        epsilon: 0.5
+        q: 21.0
+        p: 27.0
+        error_deadband_rad: 0.0
+        ftsmc_switch_rad: 0.017453292519943295
+        sat_boundary: 1.0
+        torque_soft_limit_nm: 2.0
+        torque_min_nm: -2.223
+        torque_max_nm: 2.223
+        torque_slew_rate_nm_s: 1000.0
+        ftsmc_enable: true
+        torque_slew_enable: true
+      system_identify:
+        enabled: false
+        axis_select: IdentifyAxis::BOTH
+        arming_delay_s: 3.0
+        step_torque_yaw_nm: 0.5
+        step_torque_pit_nm: 0.2
+        step_half_period_s: 0.5
+        step_cycles: 10
+        settle_time_s: 1.0
+        lpf_cutoff_hz: 50.0
+        alpha_gate_rad_s2: 1.0
+        rls_delta: 1000.0
+        rls_lambda: 1.0
+        coulomb_tanh_scale: 0.1
+        omega_abort_yaw: 8.0
+        omega_abort_pit: 4.0
+        pit_angle_margin_rad: 0.1
+        axis_timeout_s: 30.0
+      euler_topic_name: "gimbal_euler"
+      gyro_topic_name: "gimbal_gyro"
+      gimbal_cmd_topic_name: "gimbal_cmd"
 template_args:
 []
 
@@ -191,3 +185,5 @@ Modules/Gimbal/Gimbal.hpp
 使用 xrobot 1.0.1 的 `module` / 有序 `args`；构造函数显式注入外设与服务，实例按依赖顺序创建。参数名和顺序以头文件中的构造函数为准，固件示例见 `User/RobotConfig/`。
 
 保留 PLDX 控制、协议、超时与离线保护。 `OnMonitor()` 由生成的监控循环直接调用。
+
+控制任务在事件注册完成后创建，并等待启动信号。首次 `OnMonitor()` 在静态模块构造和 EventBinder 绑定完成后释放启动信号。Gimbal 调用 `CMD::UseExternalRunner()`，因此全局监控循环不会重复消费 CMD 输入。任务周期仍为 1 ms；查询 CMD 模式和 AI 在线状态与参考解释在同一任务完成。
