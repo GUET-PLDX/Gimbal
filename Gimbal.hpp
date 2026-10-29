@@ -44,20 +44,23 @@ static_assert(static_cast<uint8_t>(GimbalEvent::SET_VISION_AUTO_AIM) == 4U);
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_VISION_SMALL_BUFF) == 5U);
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_VISION_BIG_BUFF) == 6U);
 static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_IDENTIFY) == 7U);
-enum class YawManualController : uint8_t { PID, SMC };
 class Gimbal {
  public:
-  struct Param {
-    uint32_t task_stack_depth;
-    LibXR::PID<float>::Param pid_yaw_angle;
-    LibXR::PID<float>::Param pid_yaw_omega;
+  struct ControlParam {
     LibXR::PID<float>::Param pid_pit_angle;
     LibXR::PID<float>::Param pid_pit_omega;
+    YawSmc::Config yaw_smc;
+  };
+
+  struct Param {
+    uint32_t task_stack_depth;
+    ControlParam manual;
+    ControlParam auto_aim;
+    YawSmc::OutputLimits yaw_output_limits;
     float pit_max_angle;
     float pit_min_angle;
     float pit_lc;
     float pit_theta;
-    float yaw_k;
     float j_pit;
     float j_yaw;
     float pit_zero;
@@ -67,8 +70,6 @@ class Gimbal {
     float patrol_yaw_rate_rad_s;
     bool reverse_flag;
     LibXR::Thread::Priority thread_priority;
-    YawManualController yaw_manual_controller;
-    YawSmc::Config yaw_smc;
     SystemIdentify::Config system_identify;
     const char* euler_topic_name;
     const char* gyro_topic_name;
@@ -81,7 +82,7 @@ class Gimbal {
    * @param cmd 命令模块实例
    * @param motor_pit Pitch轴电机
    * @param motor_yaw Yaw轴电机
-   * @param param 配置参数：线程、PID、几何、惯量、巡逻、控制器与输入主题
+   * @param param 配置参数：控制 profile、机构、安全、巡逻与输入主题
    *
    * @note xrobot 1.x 按构造参数名检查 YAML args，配置缺项时使用声明的默认值；
    *       param 的 YAML 映射须按结构体声明顺序列出全部字段。
@@ -89,39 +90,41 @@ class Gimbal {
   Gimbal(CMD& cmd, Motor& motor_pit, Motor& motor_yaw,
          const Param& param =
              {.task_stack_depth = 2048,
-              .pid_yaw_angle = {.k = 0.0,
-                                .p = 0.0,
-                                .i = 0.0,
-                                .d = 0.0,
-                                .i_limit = 0.0,
-                                .out_limit = 0.0,
-                                .cycle = true},
-              .pid_yaw_omega = {.k = 0.0,
-                                .p = 0.0,
-                                .i = 0.0,
-                                .d = 0.0,
-                                .i_limit = 0.0,
-                                .out_limit = 2.223,
-                                .cycle = true},
-              .pid_pit_angle = {.k = 0.0,
-                                .p = 0.0,
-                                .i = 0.0,
-                                .d = 0.0,
-                                .i_limit = 0.0,
-                                .out_limit = 0.0,
-                                .cycle = false},
-              .pid_pit_omega = {.k = 0.0,
-                                .p = 0.0,
-                                .i = 0.0,
-                                .d = 0.0,
-                                .i_limit = 0.0,
-                                .out_limit = 0.0,
-                                .cycle = false},
+              .manual = {.pid_pit_angle = {.k = 0.0,
+                                           .p = 0.0,
+                                           .i = 0.0,
+                                           .d = 0.0,
+                                           .i_limit = 0.0,
+                                           .out_limit = 0.0,
+                                           .cycle = false},
+                         .pid_pit_omega = {.k = 0.0,
+                                           .p = 0.0,
+                                           .i = 0.0,
+                                           .d = 0.0,
+                                           .i_limit = 0.0,
+                                           .out_limit = 0.0,
+                                           .cycle = false},
+                         .yaw_smc = {}},
+              .auto_aim = {.pid_pit_angle = {.k = 0.0,
+                                             .p = 0.0,
+                                             .i = 0.0,
+                                             .d = 0.0,
+                                             .i_limit = 0.0,
+                                             .out_limit = 0.0,
+                                             .cycle = false},
+                           .pid_pit_omega = {.k = 0.0,
+                                             .p = 0.0,
+                                             .i = 0.0,
+                                             .d = 0.0,
+                                             .i_limit = 0.0,
+                                             .out_limit = 0.0,
+                                             .cycle = false},
+                           .yaw_smc = {}},
+              .yaw_output_limits = {},
               .pit_max_angle = 0.0,
               .pit_min_angle = 0.0,
               .pit_lc = 0.0,
               .pit_theta = 0.0,
-              .yaw_k = 0.0,
               .j_pit = 0.0,
               .j_yaw = 0.0,
               .pit_zero = 0.0,
@@ -131,21 +134,6 @@ class Gimbal {
               .patrol_yaw_rate_rad_s = 0.0,
               .reverse_flag = false,
               .thread_priority = LibXR::Thread::Priority::MEDIUM,
-              .yaw_manual_controller = YawManualController::PID,
-              .yaw_smc = {.c = 20.0,
-                          .k = 120.0,
-                          .epsilon = 0.5,
-                          .q = 21.0,
-                          .p = 27.0,
-                          .error_deadband_rad = 0.0,
-                          .ftsmc_switch_rad = 0.017453292519943295,
-                          .sat_boundary = 1.0,
-                          .torque_soft_limit_nm = 2.0,
-                          .torque_min_nm = -2.223,
-                          .torque_max_nm = 2.223,
-                          .torque_slew_rate_nm_s = 1000.0,
-                          .ftsmc_enable = true,
-                          .torque_slew_enable = true},
               .system_identify = {.enabled = false,
                                   .axis_select = IdentifyAxis::BOTH,
                                   .arming_delay_s = 3.0,
@@ -167,14 +155,11 @@ class Gimbal {
               .gyro_topic_name = "gimbal_gyro",
               .gimbal_cmd_topic_name = "gimbal_cmd"})
       : cmd_(cmd),
-        pid_yaw_angle_(param.pid_yaw_angle),
-        pid_yaw_omega_(param.pid_yaw_omega),
-        pid_pit_angle_(param.pid_pit_angle),
-        pid_pit_omega_(param.pid_pit_omega),
+        PARAM(param),
+        manual_control_(PARAM.manual, PARAM.yaw_output_limits),
+        auto_aim_control_(PARAM.auto_aim, PARAM.yaw_output_limits),
         motor_yaw_(&motor_yaw),
         motor_pit_(&motor_pit),
-        PARAM(param),
-        yaw_smc_(param.yaw_smc),
         system_identify_(param.system_identify) {
     auto lost_ctrl_callback = LibXR::Callback<uint32_t>::Create(
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
@@ -288,12 +273,29 @@ class Gimbal {
    */
   void ParseCMD() {
     const auto CTRL_MODE = cmd_.GetCtrlMode();
-    // AI Yaw 仅在自动控制、视觉在线且处于视觉任务模式时接管参考。
-    ai_yaw_active_ = CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL &&
-                     cmd_.GetAIGimbalStatus() &&
-                     (current_mode_ == GimbalEvent::SET_VISION_AUTO_AIM ||
-                      current_mode_ == GimbalEvent::SET_VISION_SMALL_BUFF ||
-                      current_mode_ == GimbalEvent::SET_VISION_BIG_BUFF);
+    // 自动控制、视觉在线且处于视觉任务模式时切换到自瞄 profile。
+    const bool AI_ACTIVE =
+        CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && cmd_.GetAIGimbalStatus() &&
+        (current_mode_ == GimbalEvent::SET_VISION_AUTO_AIM ||
+         current_mode_ == GimbalEvent::SET_VISION_SMALL_BUFF ||
+         current_mode_ == GimbalEvent::SET_VISION_BIG_BUFF);
+    if (AI_ACTIVE != ai_gimbal_reference_active_) {
+      ai_gimbal_reference_active_ = AI_ACTIVE;
+      auto& control = ActiveControl();
+      control.Reset(euler_.Pitch(), gyro_data_.y(), euler_.Yaw(),
+                    gyro_data_.z(), last_applied_yaw_torque_nm_);
+      target_yaw_cmd_ = euler_.Yaw();
+      target_pit_cmd_ = euler_.Pitch();
+      target_pit_dot_ = 0.0f;
+      target_pit_ddot_ = 0.0f;
+      target_yaw_dot_ = 0.0f;
+      target_yaw_ddot_ = 0.0f;
+      control_profile_just_changed_ = true;
+    }
+    if (control_profile_just_changed_) {
+      control_profile_just_changed_ = false;
+      return;
+    }
 
     // 操作手控制：摇杆直接积分目标角。
     if (CTRL_MODE == CMD::Mode::CMD_OP_CTRL) {
@@ -306,7 +308,7 @@ class Gimbal {
       return;
     }
 
-    if (ai_yaw_active_) {
+    if (ai_gimbal_reference_active_) {
       target_pit_cmd_ = cmd_data_.pit;
       target_pit_dot_ = cmd_data_.pit_dot;
       target_pit_ddot_ = cmd_data_.pit_ddot;
@@ -357,6 +359,7 @@ class Gimbal {
 
     if (current_mode_ == GimbalEvent::SET_MODE_RELAX) {
       motor_yaw_->Relax();
+      CommitAppliedYawTorque(0.0f);
       motor_pit_->Relax();
       return;
     }
@@ -385,7 +388,7 @@ class Gimbal {
       } else {
         motor->Control(cmd);
         if (motor == motor_yaw_) {
-          yaw_smc_.CommitAppliedTorque(cmd.torque);
+          CommitAppliedYawTorque(cmd.torque);
         }
       }
     };
@@ -397,11 +400,34 @@ class Gimbal {
   LibXR::Event& GetEvent() { return gimbal_event_; }
 
  private:
+  struct ControlState {
+    LibXR::PID<float> pid_pit_angle;
+    LibXR::PID<float> pid_pit_omega;
+    YawSmc yaw_smc;
+    float last_pit_omega = 0.0f;
+
+    ControlState(const ControlParam& param,
+                 const YawSmc::OutputLimits& output_limits)
+        : pid_pit_angle(param.pid_pit_angle),
+          pid_pit_omega(param.pid_pit_omega),
+          yaw_smc(param.yaw_smc, output_limits) {}
+
+    void Reset(float pitch, float pitch_omega, float yaw, float yaw_omega,
+               float applied_yaw_torque) {
+      pid_pit_omega.SetFeedForward(0.0f);
+      pid_pit_angle.Reset();
+      pid_pit_omega.Reset();
+      pid_pit_angle.Calculate(pitch, pitch, 1.0f);
+      pid_pit_omega.Calculate(pitch_omega, pitch_omega, 1.0f);
+      last_pit_omega = 0.0f;
+      yaw_smc.Reset(yaw, yaw_omega, applied_yaw_torque);
+    }
+  };
+
   CMD& cmd_;
-  LibXR::PID<float> pid_yaw_angle_;
-  LibXR::PID<float> pid_yaw_omega_;
-  LibXR::PID<float> pid_pit_angle_;
-  LibXR::PID<float> pid_pit_omega_;
+  const Param PARAM;
+  ControlState manual_control_;
+  ControlState auto_aim_control_;
   Motor* motor_yaw_;
   Motor* motor_pit_;
 
@@ -409,25 +435,12 @@ class Gimbal {
   Motor::Feedback motor_pit_feedback_;
 
   CMD::GimbalCMD cmd_data_;
+
   Eigen::Matrix<float, 3, 1> gyro_data_;
   LibXR::EulerAngle<float> euler_;
 
   LibXR::Event gimbal_event_;
   GimbalEvent current_mode_ = GimbalEvent::SET_MODE_RELAX;
-
-  LibXR::Topic topic_yaw_angle_ =
-      LibXR::Topic::CreateTopic<float>("yawmotor_angle");
-  LibXR::Topic topic_pit_angle_ =
-      LibXR::Topic::CreateTopic<float>("pitchmotor_angle");
-  LibXR::Topic topic_yaw_omega_ =
-      LibXR::Topic::CreateTopic<float>("yawmotor_omega");
-  LibXR::Topic topic_pit_omega_ =
-      LibXR::Topic::CreateTopic<float>("pitchmotor_omega");
-  LibXR::Topic topic_mode_ = LibXR::Topic::CreateTopic<uint8_t>("gimbal_mode");
-  LibXR::Topic topic_vision_task_ =
-      LibXR::Topic::CreateTopic<uint8_t>("vision_task");
-
-  const Param PARAM;
 
   /// 自动巡逻会话状态：进入 SET_MODE_AUTOPATROL
   /// 时一次性锁存起点，巡逻期间只读。
@@ -446,15 +459,26 @@ class Gimbal {
   LibXR::CycleValue<float> target_yaw_cmd_ = 0.0f;
   float target_yaw_dot_ = 0.0f;
   float target_yaw_ddot_ = 0.0f;
-  bool ai_yaw_active_ = false;
-  float last_pit_omega_ = 0.0f;
-  float last_yaw_omega_ = 0.0f;
+  bool ai_gimbal_reference_active_ = false;
+  bool control_profile_just_changed_ = false;
+  float last_applied_yaw_torque_nm_ = 0.0f;
   float dt_ = 0.0f;
   LibXR::MicrosecondTimestamp last_online_time_;
-  YawSmc yaw_smc_;
   SystemIdentify system_identify_;
   bool identify_boot_checked_ = false;
   bool identify_relax_lock_ = false;
+
+  LibXR::Topic topic_yaw_angle_ =
+      LibXR::Topic::CreateTopic<float>("yawmotor_angle");
+  LibXR::Topic topic_pit_angle_ =
+      LibXR::Topic::CreateTopic<float>("pitchmotor_angle");
+  LibXR::Topic topic_yaw_omega_ =
+      LibXR::Topic::CreateTopic<float>("yawmotor_omega");
+  LibXR::Topic topic_pit_omega_ =
+      LibXR::Topic::CreateTopic<float>("pitchmotor_omega");
+  LibXR::Topic topic_mode_ = LibXR::Topic::CreateTopic<uint8_t>("gimbal_mode");
+  LibXR::Topic topic_vision_task_ =
+      LibXR::Topic::CreateTopic<uint8_t>("vision_task");
   LibXR::Thread thread_;
 
   /*----------工具函数--------------------------------*/
@@ -526,7 +550,7 @@ class Gimbal {
       } else {
         motor->Control(cmd);
         if (motor == motor_yaw_) {
-          yaw_smc_.CommitAppliedTorque(cmd.torque);
+          CommitAppliedYawTorque(cmd.torque);
         }
       }
     };
@@ -538,9 +562,11 @@ class Gimbal {
       motor_control(motor_yaw_, motor_yaw_feedback_, IDENTIFY_CMD);
     } else if (ACTIVE == SystemIdentify::ActiveAxis::PITCH) {
       motor_yaw_->Relax();
+      CommitAppliedYawTorque(0.0f);
       motor_control(motor_pit_, motor_pit_feedback_, IDENTIFY_CMD);
     } else {
       motor_yaw_->Relax();
+      CommitAppliedYawTorque(0.0f);
       motor_pit_->Relax();
     }
 
@@ -551,45 +577,40 @@ class Gimbal {
     }
   }
 
+  ControlState& ActiveControl() {
+    return ai_gimbal_reference_active_ ? auto_aim_control_ : manual_control_;
+  }
+
+  void CommitAppliedYawTorque(float torque) {
+    if (!std::isfinite(torque)) {
+      return;
+    }
+    last_applied_yaw_torque_nm_ = torque;
+    ActiveControl().yaw_smc.CommitAppliedTorque(torque);
+  }
+
   /**
    * @brief 解算PID控制输出
    */
   void Solve(float& pit_output, float& yaw_output) {
+    auto& control = ActiveControl();
     const float PIT_ERROR = target_pit_cmd_ - euler_.Pitch();
-    // sp=误差、fb=0 与 sp=目标、fb=角度 等价，故 fb_dot 取 +角速度：
-    // D 项 -d*fb_dot 作用于实测角速度（微分先行），yaw 同理。
+    // sp=误差、fb=0 与 sp=目标、fb=角度 等价，故 Pitch D 项使用实测角速度。
     const float PIT_ANGLE_LOOP_OMEGA =
-        pid_pit_angle_.Calculate(PIT_ERROR, 0.0f, gyro_data_.y(), dt_);
+        control.pid_pit_angle.Calculate(PIT_ERROR, 0.0f, gyro_data_.y(), dt_);
     const float TARGET_PIT_OMEGA = PIT_ANGLE_LOOP_OMEGA + target_pit_dot_;
     const float PITCH_FEEDFORWARD =
-        JFeedforward(TARGET_PIT_OMEGA, last_pit_omega_, dt_, PARAM.j_pit) +
+        JFeedforward(TARGET_PIT_OMEGA, control.last_pit_omega, dt_,
+                     PARAM.j_pit) +
         PARAM.j_pit * target_pit_ddot_ -
         PARAM.pit_lc * sinf(euler_.Pitch() + PARAM.pit_theta);
-    pid_pit_omega_.SetFeedForward(PITCH_FEEDFORWARD);
+    control.pid_pit_omega.SetFeedForward(PITCH_FEEDFORWARD);
     pit_output =
-        pid_pit_omega_.Calculate(TARGET_PIT_OMEGA, gyro_data_.y(), dt_);
-    last_pit_omega_ = TARGET_PIT_OMEGA;
+        control.pid_pit_omega.Calculate(TARGET_PIT_OMEGA, gyro_data_.y(), dt_);
+    control.last_pit_omega = TARGET_PIT_OMEGA;
 
-    if (ai_yaw_active_) {
-      SolveSmcYaw(cmd_data_.yaw, cmd_data_.yaw_dot, cmd_data_.yaw_ddot,
-                  yaw_output);
-    } else if (PARAM.yaw_manual_controller == YawManualController::SMC) {
-      SolveSmcYaw(target_yaw_cmd_, target_yaw_dot_, target_yaw_ddot_,
-                  yaw_output);
-    } else {
-      // target_yaw_cmd_ 是 CycleValue，减法直接给出最短角差。
-      const float YAW_ERROR = target_yaw_cmd_ - euler_.Yaw();
-      const float YAW_ANGLE_LOOP_OMEGA =
-          pid_yaw_angle_.Calculate(YAW_ERROR, 0.0f, gyro_data_.z(), dt_);
-      const float TARGET_YAW_OMEGA = YAW_ANGLE_LOOP_OMEGA + target_yaw_dot_;
-      const float YAW_FEEDFORWARD =
-          JFeedforward(TARGET_YAW_OMEGA, last_yaw_omega_, dt_, PARAM.j_yaw) +
-          PARAM.j_yaw * target_yaw_ddot_ + PARAM.yaw_k * TARGET_YAW_OMEGA;
-      pid_yaw_omega_.SetFeedForward(YAW_FEEDFORWARD);
-      yaw_output =
-          pid_yaw_omega_.Calculate(TARGET_YAW_OMEGA, gyro_data_.z(), dt_);
-      last_yaw_omega_ = TARGET_YAW_OMEGA;
-    }
+    SolveSmcYaw(control.yaw_smc, target_yaw_cmd_, target_yaw_dot_,
+                target_yaw_ddot_, yaw_output);
   }
 
   /**
@@ -607,16 +628,16 @@ class Gimbal {
     return j * (target_omega - last_omega) / dt;
   }
 
-  void SolveSmcYaw(float theta_ref, float omega_ref, float alpha_ref,
-                   float& yaw_output) {
+  void SolveSmcYaw(YawSmc& yaw_smc, float theta_ref, float omega_ref,
+                   float alpha_ref, float& yaw_output) {
     const auto YAW_SMC_OUTPUT =
-        yaw_smc_.Calculate({.theta_rad = theta_ref,
-                            .omega_rad_s = omega_ref,
-                            .alpha_rad_s2 = alpha_ref},
-                           {.theta_rad = euler_.Yaw(),
-                            .omega_rad_s = gyro_data_.z(),
-                            .valid = motor_yaw_->IsOnline()},
-                           dt_, PARAM.j_yaw);
+        yaw_smc.Calculate({.theta_rad = theta_ref,
+                           .omega_rad_s = omega_ref,
+                           .alpha_rad_s2 = alpha_ref},
+                          {.theta_rad = euler_.Yaw(),
+                           .omega_rad_s = gyro_data_.z(),
+                           .valid = motor_yaw_->IsOnline()},
+                          dt_, PARAM.j_yaw);
     if (!YAW_SMC_OUTPUT.valid || !std::isfinite(YAW_SMC_OUTPUT.tau_cmd_nm)) {
       yaw_output = 0.0f;
       return;
@@ -664,50 +685,106 @@ class Gimbal {
     // current_mode_ = gimbal_event。switch 覆盖全部枚举值，default 仅为防御。
     current_mode_ = gimbal_event;
 
-    pid_pit_omega_.SetFeedForward(0.0f);
-    pid_yaw_omega_.SetFeedForward(0.0f);
-    pid_pit_angle_.Reset();
-    pid_pit_omega_.Reset();
-    pid_yaw_angle_.Reset();
-    pid_yaw_omega_.Reset();
-    target_yaw_cmd_ = euler_.Yaw();
-    target_pit_cmd_ = euler_.Pitch();
-    last_yaw_omega_ = 0.0f;
-    last_pit_omega_ = 0.0f;
-
     // LibXR::Topic::Publish 只接受左值，任务号须经具名变量发布。
     uint8_t vision_task = 0U;
     switch (gimbal_event) {
-      case GimbalEvent::SET_VISION_AUTO_AIM:
-        vision_task = 1U;
-        topic_vision_task_.Publish(vision_task);
-        break;
-      case GimbalEvent::SET_VISION_SMALL_BUFF:
-        vision_task = 2U;
-        topic_vision_task_.Publish(vision_task);
-        break;
-      case GimbalEvent::SET_VISION_BIG_BUFF:
-        vision_task = 3U;
-        topic_vision_task_.Publish(vision_task);
-        break;
       case GimbalEvent::SET_MODE_RELAX:
+        ActiveControl().Reset(euler_.Pitch(), gyro_data_.y(), euler_.Yaw(),
+                              gyro_data_.z(), last_applied_yaw_torque_nm_);
+        target_yaw_cmd_ = euler_.Yaw();
+        target_pit_cmd_ = euler_.Pitch();
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
         motor_yaw_->Disable();
+        CommitAppliedYawTorque(0.0f);
         motor_pit_->Disable();
         topic_vision_task_.Publish(vision_task);
         target_yaw_cmd_ = 0.0f;
         target_pit_cmd_ = 0.0f;
         break;
+      case GimbalEvent::SET_MODE_COMMON:
+        ActiveControl().Reset(euler_.Pitch(), gyro_data_.y(), euler_.Yaw(),
+                              gyro_data_.z(), last_applied_yaw_torque_nm_);
+        target_yaw_cmd_ = euler_.Yaw();
+        target_pit_cmd_ = euler_.Pitch();
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        break;
       case GimbalEvent::SET_MODE_AUTOPATROL:
+        ActiveControl().Reset(euler_.Pitch(), gyro_data_.y(), euler_.Yaw(),
+                              gyro_data_.z(), last_applied_yaw_torque_nm_);
+        target_yaw_cmd_ = euler_.Yaw();
+        target_pit_cmd_ = euler_.Pitch();
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
         patrol_ = {.pitch_center_rad = euler_.Pitch(),
                    .yaw_origin_rad = euler_.Yaw(),
                    .start_time = LibXR::Timebase::GetMilliseconds()};
         break;
+      case GimbalEvent::SET_VISION_IDLE:
+        ActiveControl().Reset(euler_.Pitch(), gyro_data_.y(), euler_.Yaw(),
+                              gyro_data_.z(), last_applied_yaw_torque_nm_);
+        target_yaw_cmd_ = euler_.Yaw();
+        target_pit_cmd_ = euler_.Pitch();
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        topic_vision_task_.Publish(vision_task);
+        break;
+      case GimbalEvent::SET_VISION_AUTO_AIM:
+        ActiveControl().Reset(euler_.Pitch(), gyro_data_.y(), euler_.Yaw(),
+                              gyro_data_.z(), last_applied_yaw_torque_nm_);
+        target_yaw_cmd_ = euler_.Yaw();
+        target_pit_cmd_ = euler_.Pitch();
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        vision_task = 1U;
+        topic_vision_task_.Publish(vision_task);
+        break;
+      case GimbalEvent::SET_VISION_SMALL_BUFF:
+        ActiveControl().Reset(euler_.Pitch(), gyro_data_.y(), euler_.Yaw(),
+                              gyro_data_.z(), last_applied_yaw_torque_nm_);
+        target_yaw_cmd_ = euler_.Yaw();
+        target_pit_cmd_ = euler_.Pitch();
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        vision_task = 2U;
+        topic_vision_task_.Publish(vision_task);
+        break;
+      case GimbalEvent::SET_VISION_BIG_BUFF:
+        ActiveControl().Reset(euler_.Pitch(), gyro_data_.y(), euler_.Yaw(),
+                              gyro_data_.z(), last_applied_yaw_torque_nm_);
+        target_yaw_cmd_ = euler_.Yaw();
+        target_pit_cmd_ = euler_.Pitch();
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
+        vision_task = 3U;
+        topic_vision_task_.Publish(vision_task);
+        break;
       case GimbalEvent::SET_MODE_IDENTIFY:
+        ActiveControl().Reset(euler_.Pitch(), gyro_data_.y(), euler_.Yaw(),
+                              gyro_data_.z(), last_applied_yaw_torque_nm_);
+        target_yaw_cmd_ = euler_.Yaw();
+        target_pit_cmd_ = euler_.Pitch();
+        target_pit_dot_ = 0.0f;
+        target_pit_ddot_ = 0.0f;
+        target_yaw_dot_ = 0.0f;
+        target_yaw_ddot_ = 0.0f;
         topic_vision_task_.Publish(vision_task);
         system_identify_.Begin();
-        break;
-      case GimbalEvent::SET_VISION_IDLE:
-        topic_vision_task_.Publish(vision_task);
         break;
       default:
         break;

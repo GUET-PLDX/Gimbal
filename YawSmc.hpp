@@ -14,9 +14,9 @@
 class YawSmc final {
  public:
   /**
-   * @brief Yaw 滑模调参与功能开关。
+   * @brief Yaw 滑模控制律参数。
    *
-   * @note 默认值**必须与 `Gimbal.hpp` 里 `yaw_smc` 的 manifest
+   * @note 默认值**必须与 `Gimbal.hpp` 里两个控制 profile 的 manifest
    * 默认值逐字段一致** （`tests/gimbal_config_order_regression.py`
    * 会比对，分叉即失败）。 manifest
    * 的值是**建议基线**，不是实车整定值；实车值在 `User/RobotConfig/`
@@ -33,11 +33,14 @@ class YawSmc final {
     float error_deadband_rad{0.0f};
     float ftsmc_switch_rad{static_cast<float>(LibXR::PI / 180.0)};
     float sat_boundary{1.0f};
+    bool ftsmc_enable{true};
+  };
+
+  struct OutputLimits {
     float torque_soft_limit_nm{2.0f};
     float torque_min_nm{-2.223f};
     float torque_max_nm{2.223f};
     float torque_slew_rate_nm_s{1000.0f};
-    bool ftsmc_enable{true};
     bool torque_slew_enable{true};
   };
 
@@ -86,17 +89,32 @@ class YawSmc final {
   template <typename ConfigType>
     requires std::same_as<std::remove_cvref_t<ConfigType>, Config>
   explicit YawSmc(ConfigType&& config)
-      : config_(std::forward<ConfigType>(config)) {
+      : YawSmc(std::forward<ConfigType>(config), OutputLimits{}) {}
+
+  template <typename ConfigType>
+    requires std::same_as<std::remove_cvref_t<ConfigType>, Config>
+  YawSmc(ConfigType&& config, const OutputLimits& output_limits)
+      : config_(std::forward<ConfigType>(config)),
+        output_limits_(output_limits) {
     Reset(0.0f, 0.0f, 0.0f);
   }
 
   /// @brief 只读配置访问器（诊断与主机测试用）。
   [[nodiscard]] const Config& GetConfig() const noexcept { return config_; }
+  [[nodiscard]] const OutputLimits& GetOutputLimits() const noexcept {
+    return output_limits_;
+  }
 
   static bool ValidateConfig(const Config& config, float j_kg_m2) {
+    return ValidateConfig(config, OutputLimits{}, j_kg_m2);
+  }
+
+  static bool ValidateConfig(const Config& config,
+                             const OutputLimits& output_limits, float j_kg_m2) {
     // Keep the source implementation's permissive p/q behavior: no odd
     // integer check is added at runtime.
-    if (!AllConfigFloatsFinite(config) || !std::isfinite(j_kg_m2) ||
+    if (!AllConfigFloatsFinite(config) ||
+        !AllOutputLimitFloatsFinite(output_limits) || !std::isfinite(j_kg_m2) ||
         j_kg_m2 <= MIN_J_KG_M2 || config.c <= 0.0f || config.k < 0.0f ||
         config.epsilon < 0.0f || config.error_deadband_rad < 0.0f ||
         config.sat_boundary <= 0.0f) {
@@ -107,7 +125,8 @@ class YawSmc final {
          config.ftsmc_switch_rad <= 0.0f)) {
       return false;
     }
-    if (config.torque_slew_enable && config.torque_slew_rate_nm_s <= 0.0f) {
+    if (output_limits.torque_slew_enable &&
+        output_limits.torque_slew_rate_nm_s <= 0.0f) {
       return false;
     }
     return true;
@@ -126,7 +145,7 @@ class YawSmc final {
                                  const Feedback& feedback, float dt_s,
                                  float j_kg_m2) {
     Output output{};
-    if (!ValidateConfig(config_, j_kg_m2) || !feedback.valid ||
+    if (!ValidateConfig(config_, output_limits_, j_kg_m2) || !feedback.valid ||
         !std::isfinite(reference.theta_rad) ||
         !std::isfinite(reference.omega_rad_s) ||
         !std::isfinite(reference.alpha_rad_s2) ||
@@ -147,7 +166,7 @@ class YawSmc final {
     }
 
     if (std::fabs(output.e_theta_rad) < config_.error_deadband_rad) {
-      if (config_.torque_slew_enable && !slew_primed_) {
+      if (output_limits_.torque_slew_enable && !slew_primed_) {
         slew_anchor_torque_nm_ = last_applied_torque_nm_;
       }
       slew_primed_ = true;
@@ -187,20 +206,21 @@ class YawSmc final {
     }
 
     float constrained_torque_nm = output.tau_pre_limit_nm;
-    if (config_.torque_soft_limit_nm > 0.0f) {
-      const float SOFT_LIMITED_TORQUE_NM =
-          std::clamp(constrained_torque_nm, -config_.torque_soft_limit_nm,
-                     config_.torque_soft_limit_nm);
+    if (output_limits_.torque_soft_limit_nm > 0.0f) {
+      const float SOFT_LIMITED_TORQUE_NM = std::clamp(
+          constrained_torque_nm, -output_limits_.torque_soft_limit_nm,
+          output_limits_.torque_soft_limit_nm);
       output.soft_limit_active =
           SOFT_LIMITED_TORQUE_NM != constrained_torque_nm;
       constrained_torque_nm = SOFT_LIMITED_TORQUE_NM;
     }
 
     const bool HARD_LIMIT_ENABLED =
-        config_.torque_min_nm < config_.torque_max_nm;
+        output_limits_.torque_min_nm < output_limits_.torque_max_nm;
     if (HARD_LIMIT_ENABLED) {
-      const float HARD_LIMITED_TORQUE_NM = std::clamp(
-          constrained_torque_nm, config_.torque_min_nm, config_.torque_max_nm);
+      const float HARD_LIMITED_TORQUE_NM =
+          std::clamp(constrained_torque_nm, output_limits_.torque_min_nm,
+                     output_limits_.torque_max_nm);
       output.hard_limit_active =
           HARD_LIMITED_TORQUE_NM != constrained_torque_nm;
       constrained_torque_nm = HARD_LIMITED_TORQUE_NM;
@@ -209,7 +229,7 @@ class YawSmc final {
     output.tau_cmd_nm = output.tau_cmd_before_slew_nm;
 
     float next_slew_anchor_torque_nm = slew_anchor_torque_nm_;
-    if (config_.torque_slew_enable) {
+    if (output_limits_.torque_slew_enable) {
       if (!slew_primed_) {
         next_slew_anchor_torque_nm = last_applied_torque_nm_;
       }
@@ -217,22 +237,22 @@ class YawSmc final {
       bool limit_intersection_enabled = false;
       float limit_intersection_min_nm = 0.0f;
       float limit_intersection_max_nm = 0.0f;
-      if (config_.torque_soft_limit_nm > 0.0f) {
-        limit_intersection_min_nm = -config_.torque_soft_limit_nm;
-        limit_intersection_max_nm = config_.torque_soft_limit_nm;
+      if (output_limits_.torque_soft_limit_nm > 0.0f) {
+        limit_intersection_min_nm = -output_limits_.torque_soft_limit_nm;
+        limit_intersection_max_nm = output_limits_.torque_soft_limit_nm;
         limit_intersection_enabled = true;
       }
       if (HARD_LIMIT_ENABLED) {
         if (!limit_intersection_enabled) {
-          limit_intersection_min_nm = config_.torque_min_nm;
-          limit_intersection_max_nm = config_.torque_max_nm;
+          limit_intersection_min_nm = output_limits_.torque_min_nm;
+          limit_intersection_max_nm = output_limits_.torque_max_nm;
           limit_intersection_enabled = true;
         } else {
-          if (config_.torque_min_nm > limit_intersection_min_nm) {
-            limit_intersection_min_nm = config_.torque_min_nm;
+          if (output_limits_.torque_min_nm > limit_intersection_min_nm) {
+            limit_intersection_min_nm = output_limits_.torque_min_nm;
           }
-          if (config_.torque_max_nm < limit_intersection_max_nm) {
-            limit_intersection_max_nm = config_.torque_max_nm;
+          if (output_limits_.torque_max_nm < limit_intersection_max_nm) {
+            limit_intersection_max_nm = output_limits_.torque_max_nm;
           }
         }
       }
@@ -247,7 +267,7 @@ class YawSmc final {
       }
 
       const float MAXIMUM_TORQUE_DELTA_NM =
-          config_.torque_slew_rate_nm_s * dt_s;
+          output_limits_.torque_slew_rate_nm_s * dt_s;
       const float SLEW_MIN_NM =
           next_slew_anchor_torque_nm - MAXIMUM_TORQUE_DELTA_NM;
       const float SLEW_MAX_NM =
@@ -266,7 +286,7 @@ class YawSmc final {
       return {};
     }
 
-    if (config_.torque_slew_enable && !slew_primed_) {
+    if (output_limits_.torque_slew_enable && !slew_primed_) {
       slew_anchor_torque_nm_ = last_applied_torque_nm_;
     }
     slew_primed_ = true;
@@ -280,7 +300,7 @@ class YawSmc final {
     }
     last_applied_torque_nm_ = applied_torque_nm;
     // 配置锁存后 slew 是否启用是常量，故只需判「Calculate 是否已跑过一周期」。
-    if (slew_primed_ && config_.torque_slew_enable) {
+    if (slew_primed_ && output_limits_.torque_slew_enable) {
       slew_anchor_torque_nm_ = applied_torque_nm;
     }
   }
@@ -323,13 +343,17 @@ class YawSmc final {
            std::isfinite(config.p) &&
            std::isfinite(config.error_deadband_rad) &&
            std::isfinite(config.ftsmc_switch_rad) &&
-           std::isfinite(config.sat_boundary) &&
-           std::isfinite(config.torque_soft_limit_nm) &&
-           std::isfinite(config.torque_min_nm) &&
-           std::isfinite(config.torque_max_nm) &&
-           std::isfinite(config.torque_slew_rate_nm_s);
+           std::isfinite(config.sat_boundary);
   }
 
+  static bool AllOutputLimitFloatsFinite(const OutputLimits& limits) {
+    return std::isfinite(limits.torque_soft_limit_nm) &&
+           std::isfinite(limits.torque_min_nm) &&
+           std::isfinite(limits.torque_max_nm) &&
+           std::isfinite(limits.torque_slew_rate_nm_s);
+  }
+
+  const OutputLimits output_limits_{};
   float last_applied_torque_nm_{};
   float slew_anchor_torque_nm_{};
   bool slew_primed_{};  ///< 首周期 slew anchor 播种标志

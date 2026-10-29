@@ -38,11 +38,14 @@ inline YawSmc::Config base_yaw_smc_config() {
           .error_deadband_rad = 0.0f,
           .ftsmc_switch_rad = static_cast<float>(LibXR::PI / 180.0),
           .sat_boundary = 1.0f,
-          .torque_soft_limit_nm = 2.0f,
+          .ftsmc_enable = true};
+}
+
+inline YawSmc::OutputLimits base_yaw_smc_limits() {
+  return {.torque_soft_limit_nm = 2.0f,
           .torque_min_nm = -2.223f,
           .torque_max_nm = 2.223f,
           .torque_slew_rate_nm_s = 1000.0f,
-          .ftsmc_enable = true,
           .torque_slew_enable = true};
 }
 

@@ -35,7 +35,7 @@ tau_smc = J * (-surface_dot_term - epsilon * Sat(s) - k * s)
 
 ### Yaw 控制器配置
 
-`YawSmc` 在构造期锁存 `const Config config_`，`Calculate()` 只接收参考、反馈、`dt` 和 `j_yaw`。`Gimbal` 在初始化列表中用 `REQUIRE(YawSmc::ValidateConfig(...))` 校验配置，失败时在控制线程启动前挂起。`YawSmc::Config` 的成员默认值须与 `Gimbal.hpp` 中 `yaw_smc` 的默认实参一致，由 `tests/gimbal_config_order_regression.py` 校验。
+`YawSmc` 在构造期锁存控制律参数与共享输出限幅；`Calculate()` 接收参考、反馈、`dt` 和共享的 `j_yaw`。`manual` 与 `auto_aim` 各有独立的 Pitch 双环 PID 和 Yaw SMC 控制律参数；力矩软硬限幅及变化率限制由 `yaw_output_limits` 共用。控制配置切换时，切入的控制器状态会重置，Yaw SMC 的变化率状态以最近一次下发力矩为起点。`tests/gimbal_config_order_regression.py` 校验配置字段顺序与默认值。
 
 ## 2. 主要函数说明
 1. ThreadFunc: 云台控制主线程，也是 CMD 的唯一运行任务；每轮依次 UpdateInputs、读取本次命令、解释参考并控制电机。
@@ -46,10 +46,10 @@ tau_smc = J * (-surface_dot_term - epsilon * Sat(s) - k * s)
 6. DebugCommand: 调试命令入口（Debug 构建）。
 
 ## 3. 接入步骤
-1. 添加模块并绑定 motor_roll、motor_yaw、cmd。
-2. 配置零位、限位、惯量与 PID 参数。
-3. 手动和自瞄共用同一套 Yaw 算法实例。`yaw_manual_controller` 选 PID 或 SMC，自瞄固定使用 SMC。`gimbal_cmd` 的 yaw/pit 已是绝对角（操作手积分在 CMD 完成，自瞄为视觉轨迹）。
-4. 先验证模式切换，再联调控制参数。首次启用滑模时降低 `yaw_smc.torque_soft_limit_nm`，确认力矩极性后再抬升。
+1. 添加模块并绑定 motor_pit、motor_yaw、cmd。
+2. 配置零位、限位、惯量和两套控制 profile。
+3. 操作手、自动回退和巡逻使用 `manual`；自动控制下 AI 在线且选择自瞄/小符/大符任务时使用 `auto_aim`。Yaw 始终使用 SMC。`gimbal_cmd` 的 yaw/pit 是绝对角（操作手输入由 Gimbal 积分，自瞄为视觉轨迹）。
+4. 两套 profile 分别整定 `yaw_smc`，力矩限幅与变化率配置在共用的 `yaw_output_limits` 中。
 
 云台姿态输入 topic：
 - `gimbal_cmd`：CMD 发布的云台控制命令。
@@ -82,43 +82,24 @@ args:
   - motor_yaw: motor_yaw
   - param:
       task_stack_depth: 2048
-      pid_yaw_angle:
-        k: 0.0
-        p: 0.0
-        i: 0.0
-        d: 0.0
-        i_limit: 0.0
-        out_limit: 0.0
-        cycle: true
-      pid_yaw_omega:
-        k: 0.0
-        p: 0.0
-        i: 0.0
-        d: 0.0
-        i_limit: 0.0
-        out_limit: 0.0
-        cycle: true
-      pid_pit_angle:
-        k: 0.0
-        p: 0.0
-        i: 0.0
-        d: 0.0
-        i_limit: 0.0
-        out_limit: 0.0
-        cycle: false
-      pid_pit_omega:
-        k: 0.0
-        p: 0.0
-        i: 0.0
-        d: 0.0
-        i_limit: 0.0
-        out_limit: 0.0
-        cycle: false
+      manual:
+        pid_pit_angle: {k: 0.0, p: 0.0, i: 0.0, d: 0.0, i_limit: 0.0, out_limit: 0.0, cycle: false}
+        pid_pit_omega: {k: 0.0, p: 0.0, i: 0.0, d: 0.0, i_limit: 0.0, out_limit: 0.0, cycle: false}
+        yaw_smc: {c: 20.0, k: 120.0, epsilon: 0.5, q: 21.0, p: 27.0, error_deadband_rad: 0.0, ftsmc_switch_rad: 0.017453292519943295, sat_boundary: 1.0, ftsmc_enable: true}
+      auto_aim:
+        pid_pit_angle: {k: 0.0, p: 0.0, i: 0.0, d: 0.0, i_limit: 0.0, out_limit: 0.0, cycle: false}
+        pid_pit_omega: {k: 0.0, p: 0.0, i: 0.0, d: 0.0, i_limit: 0.0, out_limit: 0.0, cycle: false}
+        yaw_smc: {c: 20.0, k: 120.0, epsilon: 0.5, q: 21.0, p: 27.0, error_deadband_rad: 0.0, ftsmc_switch_rad: 0.017453292519943295, sat_boundary: 1.0, ftsmc_enable: true}
+      yaw_output_limits:
+        torque_soft_limit_nm: 2.0
+        torque_min_nm: -2.223
+        torque_max_nm: 2.223
+        torque_slew_rate_nm_s: 1000.0
+        torque_slew_enable: true
       pit_max_angle: 0.0
       pit_min_angle: 0.0
       pit_lc: 0.0
       pit_theta: 0.0
-      yaw_k: 0.0
       j_pit: 0.0
       j_yaw: 0.0
       pit_zero: 0.0
@@ -128,22 +109,6 @@ args:
       patrol_yaw_rate_rad_s: 0.0
       reverse_flag: false
       thread_priority: LibXR::Thread::Priority::MEDIUM
-      yaw_manual_controller: YawManualController::PID
-      yaw_smc:
-        c: 20.0
-        k: 120.0
-        epsilon: 0.5
-        q: 21.0
-        p: 27.0
-        error_deadband_rad: 0.0
-        ftsmc_switch_rad: 0.017453292519943295
-        sat_boundary: 1.0
-        torque_soft_limit_nm: 2.0
-        torque_min_nm: -2.223
-        torque_max_nm: 2.223
-        torque_slew_rate_nm_s: 1000.0
-        ftsmc_enable: true
-        torque_slew_enable: true
       system_identify:
         enabled: false
         axis_select: IdentifyAxis::BOTH

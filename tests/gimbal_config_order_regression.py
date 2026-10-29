@@ -34,12 +34,7 @@ SMC_EXPECTED_FIELDS = (
     "error_deadband_rad",
     "ftsmc_switch_rad",
     "sat_boundary",
-    "torque_soft_limit_nm",
-    "torque_min_nm",
-    "torque_max_nm",
-    "torque_slew_rate_nm_s",
     "ftsmc_enable",
-    "torque_slew_enable",
 )
 
 SMC_EXPECTED_DEFAULTS = {
@@ -51,11 +46,22 @@ SMC_EXPECTED_DEFAULTS = {
     "error_deadband_rad": 0.0,
     "ftsmc_switch_rad": math.pi / 180,
     "sat_boundary": 1.0,
+    "ftsmc_enable": True,
+}
+
+OUTPUT_LIMIT_FIELDS = (
+    "torque_soft_limit_nm",
+    "torque_min_nm",
+    "torque_max_nm",
+    "torque_slew_rate_nm_s",
+    "torque_slew_enable",
+)
+
+OUTPUT_LIMIT_DEFAULTS = {
     "torque_soft_limit_nm": 2.0,
     "torque_min_nm": -2.223,
     "torque_max_nm": 2.223,
     "torque_slew_rate_nm_s": 1000.0,
-    "ftsmc_enable": True,
     "torque_slew_enable": True,
 }
 
@@ -100,6 +106,31 @@ SYSID_EXPECTED_DEFAULTS = {
     "pit_angle_margin_rad": 0.1,
     "axis_timeout_s": 30.0,
 }
+
+CONTROL_PARAM_FIELDS = ("pid_pit_angle", "pid_pit_omega", "yaw_smc")
+GIMBAL_PARAM_FIELDS = (
+    "task_stack_depth",
+    "manual",
+    "auto_aim",
+    "yaw_output_limits",
+    "pit_max_angle",
+    "pit_min_angle",
+    "pit_lc",
+    "pit_theta",
+    "j_pit",
+    "j_yaw",
+    "pit_zero",
+    "yaw_zero",
+    "patrol_pitch_amplitude_rad",
+    "patrol_pitch_angular_rate_rad_s",
+    "patrol_yaw_rate_rad_s",
+    "reverse_flag",
+    "thread_priority",
+    "system_identify",
+    "euler_topic_name",
+    "gyro_topic_name",
+    "gimbal_cmd_topic_name",
+)
 
 
 
@@ -198,14 +229,85 @@ def check_cpp_defaults(defaults, expected, label):
 smc_fields = config_fields(pathlib.Path(args.smc_algorithm).read_text(), "Config")
 if smc_fields != SMC_EXPECTED_FIELDS:
     raise SystemExit("SMC Config order mismatch")
+output_limit_fields = config_fields(
+    pathlib.Path(args.smc_algorithm).read_text(), "OutputLimits"
+)
+if output_limit_fields != OUTPUT_LIMIT_FIELDS:
+    raise SystemExit("SMC OutputLimits order mismatch")
 
 header = pathlib.Path(args.header).read_text()
+param_body = re.search(r"struct Param\s*\{(.*?)\n\s*\};", header, re.S).group(1)
+param_fields = tuple(
+    re.findall(
+        r"^\s*(?:uint32_t|ControlParam|YawSmc::OutputLimits|float|bool|"
+        r"LibXR::Thread::Priority|SystemIdentify::Config|const char\*)\s+(\w+)\s*;",
+        param_body,
+        re.M,
+    )
+)
+if param_fields != GIMBAL_PARAM_FIELDS:
+    raise SystemExit("Gimbal Param order mismatch")
+control_param_body = re.search(
+    r"struct ControlParam\s*\{(.*?)\n\s*\};", header, re.S
+).group(1)
+control_param_fields = tuple(
+    re.findall(
+        r"^\s*(?:LibXR::PID<float>::Param|YawSmc::Config)\s+(\w+)\s*;",
+        control_param_body,
+        re.M,
+    )
+)
+if control_param_fields != CONTROL_PARAM_FIELDS:
+    raise SystemExit("ControlParam order mismatch")
+
+if "pid_yaw_angle" in header or "pid_yaw_omega" in header or "YawManualController" in header:
+    raise SystemExit("Yaw PID or controller selection remains in Gimbal")
+if not re.search(
+    r"CTRL_MODE == CMD::Mode::CMD_AUTO_CTRL && cmd_\.GetAIGimbalStatus\(\) &&"
+    r"\s*\(current_mode_ == GimbalEvent::SET_VISION_AUTO_AIM \|\|"
+    r"\s*current_mode_ == GimbalEvent::SET_VISION_SMALL_BUFF \|\|"
+    r"\s*current_mode_ == GimbalEvent::SET_VISION_BIG_BUFF\)",
+    header,
+):
+    raise SystemExit("AI profile activation gate mismatch")
+if not re.search(
+    r"if \(AI_ACTIVE != ai_gimbal_reference_active_\) \{.*?"
+    r"ai_gimbal_reference_active_ = AI_ACTIVE;.*?"
+    r"control_profile_just_changed_ = true;",
+    header,
+    re.S,
+):
+    raise SystemExit("profile switch reset and target latch mismatch")
+if "SolveSmcYaw(control.yaw_smc, target_yaw_cmd_, target_yaw_dot_," not in header:
+    raise SystemExit("Yaw control must always use the active profile SMC")
+patrol_case = re.search(
+    r"case GimbalEvent::SET_MODE_AUTOPATROL:(.*?)(?=case GimbalEvent::)",
+    header,
+    re.S,
+)
+if patrol_case is None or any(
+    token not in patrol_case.group(1)
+    for token in (
+        "ActiveControl().Reset(",
+        "target_yaw_cmd_ = euler_.Yaw();",
+        "target_pit_cmd_ = euler_.Pitch();",
+        "target_yaw_ddot_ = 0.0f;",
+        "patrol_ =",
+    )
+):
+    raise SystemExit("AUTO PATROL case must reset control/reference before starting patrol")
+
 # C++ 结构体默认值必须逐字段等于 manifest 默认值：两者分叉会让"省略键就用默认值"
 # 这件事失真（曾经 C++ 侧全零、manifest 侧是正增益，全零配置能通过校验 → 静默零增益）。
 check_cpp_defaults(
     config_defaults(pathlib.Path(args.smc_algorithm).read_text(), "Config"),
     SMC_EXPECTED_DEFAULTS,
     "SMC",
+)
+check_cpp_defaults(
+    config_defaults(pathlib.Path(args.smc_algorithm).read_text(), "OutputLimits"),
+    OUTPUT_LIMIT_DEFAULTS,
+    "SMC OutputLimits",
 )
 sysid_fields = config_fields(pathlib.Path(args.sysid_algorithm).read_text(), "Config")
 if sysid_fields != SYSID_EXPECTED_FIELDS:
@@ -227,19 +329,27 @@ if not args.header_only:
     if LEGACY_PATROL_KEYS & set(gimbal_args):
         raise SystemExit("legacy patrol parameters remain in target YAML")
     target_gimbal_param = gimbal_args[GIMBAL_PARAM_KEY]
+    if tuple(target_gimbal_param.keys()) != GIMBAL_PARAM_FIELDS:
+        raise SystemExit("target Gimbal Param order mismatch")
     for key, expected_value in PATROL_VALUES.items():
         if target_gimbal_param.get(key) != expected_value:
             raise SystemExit(f"target YAML patrol value mismatch: {key}")
     if "ai_yaw_lqr_eso_enable" in gimbal_args:
         raise SystemExit("removed route master remains in target YAML")
     target_gimbal_param = gimbal_args[GIMBAL_PARAM_KEY]
-    if target_gimbal_param.get("yaw_manual_controller") != "YawManualController::SMC":
-        raise SystemExit("sentry gimbal YAML must select SMC for manual Yaw")
+    if {"yaw_manual_controller", "pid_yaw_angle", "pid_yaw_omega", "yaw_k", "yaw_smc"} & set(target_gimbal_param):
+        raise SystemExit("removed single-profile Yaw parameters remain in target YAML")
     if {"yaw_lqr_eso", "ai_yaw_lqr_eso_enable"} & set(gimbal_args) or {"yaw_ai_controller", "rotor_ff_enabled"} & set(target_gimbal_param):
         raise SystemExit("removed LQR/ESO or rotor feedforward parameters remain in target YAML")
-    smc_yaml = target_gimbal_param["yaw_smc"]
-    if tuple(smc_yaml.keys()) != SMC_EXPECTED_FIELDS:
-        raise SystemExit("SMC YAML order mismatch")
+    for profile_name in ("manual", "auto_aim"):
+        profile = target_gimbal_param[profile_name]
+        if tuple(profile.keys()) != CONTROL_PARAM_FIELDS:
+            raise SystemExit(f"{profile_name} control profile order mismatch")
+        if tuple(profile["yaw_smc"].keys()) != SMC_EXPECTED_FIELDS:
+            raise SystemExit(f"{profile_name} SMC YAML order mismatch")
+    output_limits_yaml = target_gimbal_param["yaw_output_limits"]
+    if tuple(output_limits_yaml.keys()) != OUTPUT_LIMIT_FIELDS:
+        raise SystemExit("shared Yaw output limits YAML order mismatch")
     sysid_yaml = target_gimbal_param["system_identify"]
     if tuple(sysid_yaml.keys()) != SYSID_EXPECTED_FIELDS:
         raise SystemExit("SYSID YAML order mismatch")
@@ -255,16 +365,21 @@ if not args.header_only:
         def designated(mapping, fields):
             return ",".join(f".{key}={cpp(mapping[key])}" for key in fields)
 
-        smc_expected = designated(smc_yaml, SMC_EXPECTED_FIELDS)
-        sysid_expected = designated(sysid_yaml, SYSID_EXPECTED_FIELDS)
         generated = re.sub(
             r"^\s*#line.*$", "", pathlib.Path(args.generated).read_text(), flags=re.M
         )
         generated = re.sub(r"\s+", "", generated)
-        if "YawManualController::SMC" not in generated:
-            raise SystemExit("generated manual controller enum mismatch")
-        if smc_expected not in generated:
-            raise SystemExit("generated SMC aggregate mismatch")
+        for profile_name in ("manual", "auto_aim"):
+            smc_yaml = target_gimbal_param[profile_name]["yaw_smc"]
+            smc_expected = designated(smc_yaml, SMC_EXPECTED_FIELDS)
+            if smc_expected not in generated:
+                raise SystemExit(f"generated {profile_name} SMC aggregate mismatch")
+        limits_expected = designated(output_limits_yaml, OUTPUT_LIMIT_FIELDS)
+        sysid_expected = designated(sysid_yaml, SYSID_EXPECTED_FIELDS)
+        if "YawManualController" in generated or "pid_yaw_angle" in generated:
+            raise SystemExit("generated output retains removed Yaw PID settings")
+        if limits_expected not in generated:
+            raise SystemExit("generated shared Yaw output limits aggregate mismatch")
         if sysid_expected not in generated:
             raise SystemExit("generated SYSID aggregate mismatch")
 
