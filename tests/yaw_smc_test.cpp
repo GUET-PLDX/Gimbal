@@ -12,7 +12,7 @@ static_assert(!std::is_copy_assignable_v<YawSmc>);
 static_assert(!std::is_move_assignable_v<YawSmc>);
 static_assert(
     std::is_same_v<decltype(std::declval<const YawSmc&>().GetConfig()),
-                   const YawSmc::Config&>);
+                   const YawSmc::Param&>);
 
 static YawSmc::Output calculate_once(YawSmc& controller, float theta_ref,
                                      float omega_ref, float alpha_ref,
@@ -24,43 +24,6 @@ static YawSmc::Output calculate_once(YawSmc& controller, float theta_ref,
        .alpha_rad_s2 = alpha_ref},
       {.theta_rad = theta, .omega_rad_s = omega, .valid = true}, dt_s,
       BASE_YAW_SMC_J_KG_M2);
-}
-
-static void test_config_validation() {
-  auto cfg = base_yaw_smc_config();
-  auto limits = base_yaw_smc_limits();
-  CHECK(YawSmc::ValidateConfig(cfg, limits, BASE_YAW_SMC_J_KG_M2));
-  CHECK(!YawSmc::ValidateConfig(cfg, limits, 0.0f));
-  cfg = base_yaw_smc_config();
-  cfg.c = 0.0f;
-  CHECK(!YawSmc::ValidateConfig(cfg, limits, BASE_YAW_SMC_J_KG_M2));
-  cfg = base_yaw_smc_config();
-  cfg.k = -1.0f;
-  CHECK(!YawSmc::ValidateConfig(cfg, limits, BASE_YAW_SMC_J_KG_M2));
-  cfg = base_yaw_smc_config();
-  cfg.q = 27.0f;
-  CHECK(!YawSmc::ValidateConfig(cfg, limits, BASE_YAW_SMC_J_KG_M2));
-  cfg = base_yaw_smc_config();
-  cfg.ftsmc_switch_rad = 0.0f;
-  CHECK(!YawSmc::ValidateConfig(cfg, limits, BASE_YAW_SMC_J_KG_M2));
-  cfg = base_yaw_smc_config();
-  cfg.sat_boundary = 0.0f;
-  CHECK(!YawSmc::ValidateConfig(cfg, limits, BASE_YAW_SMC_J_KG_M2));
-  cfg = base_yaw_smc_config();
-  cfg.ftsmc_enable = false;
-  cfg.q = -1.0f;
-  cfg.p = 0.0f;
-  cfg.ftsmc_switch_rad = 0.0f;
-  CHECK(YawSmc::ValidateConfig(cfg, limits, BASE_YAW_SMC_J_KG_M2));
-  cfg = base_yaw_smc_config();
-  cfg.epsilon = std::numeric_limits<float>::quiet_NaN();
-  CHECK(!YawSmc::ValidateConfig(cfg, limits, BASE_YAW_SMC_J_KG_M2));
-  // 默认构造的 Config 必须是**可用**配置（逐字段等于 Gimbal.hpp 的 manifest
-  // 默认值， 由 tests/gimbal_config_order_regression.py
-  // 守护），不是"未配置"哨兵； 零增益配置由上面的 `cfg.c = 0.0f` 这条拒绝（`c
-  // <= 0`）。
-  CHECK(YawSmc::ValidateConfig(YawSmc::Config{}, limits,
-                              BASE_YAW_SMC_J_KG_M2));
 }
 
 static void test_linear_smc_law() {
@@ -147,7 +110,7 @@ static void test_ftsmc_switch_and_direct_error() {
   output = calculate_once(controller, 0.0f, 0.0f, 0.0f, 0.01f, 0.0f);
   CHECK(!output.used_ftsmc);
 
-  controller.Reset(3.13f, 0.0f, 0.0f);
+  controller.Reset(0.0f);
   output = calculate_once(controller, -3.13f, 0.0f, 0.0f, 3.13f, 0.0f);
   CHECK(std::fabs(output.e_theta_rad) < 0.03f);
 }
@@ -198,7 +161,7 @@ static void test_cycle_value_error_matches_pid_geometry() {
   YawSmc controller{cfg, limits};
   const float THETA = -0.5f;
   const float TARGET = static_cast<float>(LibXR::TWO_PI) - 0.5f;
-  controller.Reset(THETA, 0.0f, 0.0f);
+  controller.Reset(0.0f);
   auto output = calculate_once(controller, TARGET, 0.0f, 0.0f, THETA, 0.0f);
   CHECK(output.valid);
   CHECK(std::fabs(output.e_theta_rad) < 1.0e-5f);
@@ -334,7 +297,7 @@ static void test_slew_uses_only_committed_torque() {
   limits.torque_slew_rate_nm_s = 100.0f;
 
   YawSmc controller{cfg, limits};
-  controller.Reset(0.0f, 0.0f, 1.5f);
+  controller.Reset(1.5f);
   auto output = calculate_once(controller, 0.0f, 0.0f, 200.0f, 0.1f, -100.0f);
   CHECK(output.tau_pre_limit_nm > 2.0f);
   CHECK_NEAR(output.tau_cmd_before_slew_nm, 2.0f, 1.0e-6f);
@@ -362,7 +325,7 @@ static void test_slew_reentry_uses_latest_applied_torque() {
   limits.torque_slew_rate_nm_s = 100.0f;
 
   YawSmc controller{cfg, limits};
-  controller.Reset(0.0f, 0.0f, -0.5f);
+  controller.Reset(-0.5f);
   const auto output =
       calculate_once(controller, 0.0f, 0.0f, 200.0f, 0.1f, -100.0f);
   CHECK_NEAR(output.tau_cmd_nm, -0.3f, 1.0e-6f);
@@ -374,17 +337,9 @@ static void test_invalid_inputs_are_rejected() {
   auto limits = base_yaw_smc_limits();
   limits.torque_slew_rate_nm_s = 100.0f;
   YawSmc controller{cfg, limits};
-  controller.Reset(0.0f, 0.0f, 1.5f);
+  controller.Reset(1.5f);
 
-  // 非法配置在锁存形态下由"另一个用非法配置构造的实例"表达。
-  auto invalid_cfg = cfg;
-  invalid_cfg.c = -1.0f;
-  YawSmc invalid_controller{invalid_cfg, limits};
-  auto output =
-      calculate_once(invalid_controller, 0.0f, -100.0f, 200.0f, 0.1f, 0.0f);
-  CHECK(!output.valid);
-
-  output = controller.Calculate(
+  auto output = controller.Calculate(
       {.theta_rad = std::numeric_limits<float>::quiet_NaN(),
        .omega_rad_s = 0.0f,
        .alpha_rad_s2 = 0.0f},
@@ -410,7 +365,6 @@ static void test_invalid_inputs_are_rejected() {
 }
 
 int main() {
-  test_config_validation();
   test_linear_smc_law();
   test_ftsmc_law_both_signs();
   test_ftsmc_switch_and_direct_error();

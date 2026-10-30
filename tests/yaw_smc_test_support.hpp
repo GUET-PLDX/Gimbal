@@ -26,10 +26,10 @@ inline void check_near(float actual, float expected, float tolerance,
 #define CHECK_NEAR(ACTUAL, EXPECTED, TOL) \
   check_near((ACTUAL), (EXPECTED), (TOL), #ACTUAL, __LINE__)
 
-// 被控对象惯量已从 Config 移出、改为按调用传入，主机测试统一使用该基准值。
+// 被控对象惯量已从 Param 移出、改为按调用传入，主机测试统一使用该基准值。
 inline constexpr float BASE_YAW_SMC_J_KG_M2 = 0.03f;
 
-inline YawSmc::Config base_yaw_smc_config() {
+inline YawSmc::Param base_yaw_smc_config() {
   return {.c = 20.0f,
           .k = 2.0f,
           .epsilon = 0.5f,
@@ -76,7 +76,7 @@ struct SmcCodeOracle {
   bool in_deadband{};
 };
 
-inline SmcCodeOracle smc_code_oracle(const YawSmc::Config& config,
+inline SmcCodeOracle smc_code_oracle(const YawSmc::Param& config,
                                      const YawSmc::Reference& reference,
                                      const YawSmc::Feedback& feedback,
                                      float j_kg_m2) {

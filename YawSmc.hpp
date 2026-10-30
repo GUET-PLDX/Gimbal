@@ -24,7 +24,7 @@ class YawSmc final {
    * @note 默认值**不是"未配置"哨兵**：模块不再给 `yaw_smc` 形参默认实参，
    *       漏配会在编译期报错，因此这里放的是可用配置而不是全零。
    */
-  struct Config {
+  struct Param {
     float c{20.0f};
     float k{120.0f};
     float epsilon{0.5f};
@@ -44,10 +44,10 @@ class YawSmc final {
     bool torque_slew_enable{true};
   };
 
-  // xrobot 按声明顺序位置聚合 Config，这三条契约守护该初始化方式。
-  static_assert(std::is_aggregate_v<Config>);
-  static_assert(std::is_trivially_copyable_v<Config>);
-  static_assert(std::is_standard_layout_v<Config>);
+  // xrobot 按声明顺序位置聚合 Param，这三条契约守护该初始化方式。
+  static_assert(std::is_aggregate_v<Param>);
+  static_assert(std::is_trivially_copyable_v<Param>);
+  static_assert(std::is_standard_layout_v<Param>);
 
   struct Reference {
     // 目标角度、角速度和角加速度均使用 SI 单位并直接参与控制律。
@@ -87,55 +87,25 @@ class YawSmc final {
    *       劫持隐式拷贝构造（`YawSmc a(b);` 的 ConfigType 是 `const YawSmc&`）。
    */
   template <typename ConfigType>
-    requires std::same_as<std::remove_cvref_t<ConfigType>, Config>
+    requires std::same_as<std::remove_cvref_t<ConfigType>, Param>
   explicit YawSmc(ConfigType&& config)
       : YawSmc(std::forward<ConfigType>(config), OutputLimits{}) {}
 
   template <typename ConfigType>
-    requires std::same_as<std::remove_cvref_t<ConfigType>, Config>
+    requires std::same_as<std::remove_cvref_t<ConfigType>, Param>
   YawSmc(ConfigType&& config, const OutputLimits& output_limits)
       : config_(std::forward<ConfigType>(config)),
         output_limits_(output_limits) {
-    Reset(0.0f, 0.0f, 0.0f);
+    Reset(0.0f);
   }
 
   /// @brief 只读配置访问器（诊断与主机测试用）。
-  [[nodiscard]] const Config& GetConfig() const noexcept { return config_; }
+  [[nodiscard]] const Param& GetConfig() const noexcept { return config_; }
   [[nodiscard]] const OutputLimits& GetOutputLimits() const noexcept {
     return output_limits_;
   }
 
-  static bool ValidateConfig(const Config& config, float j_kg_m2) {
-    return ValidateConfig(config, OutputLimits{}, j_kg_m2);
-  }
-
-  static bool ValidateConfig(const Config& config,
-                             const OutputLimits& output_limits, float j_kg_m2) {
-    // Keep the source implementation's permissive p/q behavior: no odd
-    // integer check is added at runtime.
-    if (!AllConfigFloatsFinite(config) ||
-        !AllOutputLimitFloatsFinite(output_limits) || !std::isfinite(j_kg_m2) ||
-        j_kg_m2 <= MIN_J_KG_M2 || config.c <= 0.0f || config.k < 0.0f ||
-        config.epsilon < 0.0f || config.error_deadband_rad < 0.0f ||
-        config.sat_boundary <= 0.0f) {
-      return false;
-    }
-    if (config.ftsmc_enable &&
-        (config.q <= 0.0f || config.p <= 0.0f || config.q >= config.p ||
-         config.ftsmc_switch_rad <= 0.0f)) {
-      return false;
-    }
-    if (output_limits.torque_slew_enable &&
-        output_limits.torque_slew_rate_nm_s <= 0.0f) {
-      return false;
-    }
-    return true;
-  }
-
-  void Reset(float theta_rad, float omega_rad_s,
-             float previous_applied_torque_nm) {
-    UNUSED(theta_rad);
-    UNUSED(omega_rad_s);
+  void Reset(float previous_applied_torque_nm) {
     last_applied_torque_nm_ = previous_applied_torque_nm;
     slew_anchor_torque_nm_ = previous_applied_torque_nm;
     slew_primed_ = false;
@@ -145,7 +115,7 @@ class YawSmc final {
                                  const Feedback& feedback, float dt_s,
                                  float j_kg_m2) {
     Output output{};
-    if (!ValidateConfig(config_, output_limits_, j_kg_m2) || !feedback.valid ||
+    if (!feedback.valid || !std::isfinite(j_kg_m2) ||
         !std::isfinite(reference.theta_rad) ||
         !std::isfinite(reference.omega_rad_s) ||
         !std::isfinite(reference.alpha_rad_s2) ||
@@ -306,9 +276,8 @@ class YawSmc final {
   }
 
  private:
-  const Config config_;  ///< 构造期锁存，运行期只读（对齐 LibXR::PID::param_）
+  const Param config_;  ///< 构造期锁存，运行期只读（对齐 LibXR::PID::param_）
 
-  static constexpr float MIN_J_KG_M2 = 1e-6f;
   static constexpr float MIN_DT_S = 0.0005f;
   static constexpr float MAX_DT_S = 0.02f;
 
@@ -335,22 +304,6 @@ class YawSmc final {
            std::isfinite(output.tau_pre_limit_nm) &&
            std::isfinite(output.tau_cmd_before_slew_nm) &&
            std::isfinite(output.tau_cmd_nm);
-  }
-
-  static bool AllConfigFloatsFinite(const Config& config) {
-    return std::isfinite(config.c) && std::isfinite(config.k) &&
-           std::isfinite(config.epsilon) && std::isfinite(config.q) &&
-           std::isfinite(config.p) &&
-           std::isfinite(config.error_deadband_rad) &&
-           std::isfinite(config.ftsmc_switch_rad) &&
-           std::isfinite(config.sat_boundary);
-  }
-
-  static bool AllOutputLimitFloatsFinite(const OutputLimits& limits) {
-    return std::isfinite(limits.torque_soft_limit_nm) &&
-           std::isfinite(limits.torque_min_nm) &&
-           std::isfinite(limits.torque_max_nm) &&
-           std::isfinite(limits.torque_slew_rate_nm_s);
   }
 
   const OutputLimits output_limits_{};

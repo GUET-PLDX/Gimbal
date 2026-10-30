@@ -8,7 +8,8 @@ import yaml
 
 
 MODULE_ROOT = pathlib.Path(__file__).resolve().parent.parent
-ROOT = MODULE_ROOT.parent.parent
+ROOT = next(parent for parent in MODULE_ROOT.parents
+            if (parent / "Modules/modules.yaml").is_file())
 # xrobot 1.0 matches the ordered argument names to the C++ constructor.
 GIMBAL_PARAM_KEY = "param"
 PATROL_KEYS = (
@@ -226,7 +227,7 @@ def check_cpp_defaults(defaults, expected, label):
         elif actual_value != expected_value:
             raise SystemExit(f"{label} C++ Config default mismatch: {key}")
 
-smc_fields = config_fields(pathlib.Path(args.smc_algorithm).read_text(), "Config")
+smc_fields = config_fields(pathlib.Path(args.smc_algorithm).read_text(), "Param")
 if smc_fields != SMC_EXPECTED_FIELDS:
     raise SystemExit("SMC Config order mismatch")
 output_limit_fields = config_fields(
@@ -252,7 +253,7 @@ control_param_body = re.search(
 ).group(1)
 control_param_fields = tuple(
     re.findall(
-        r"^\s*(?:LibXR::PID<float>::Param|YawSmc::Config)\s+(\w+)\s*;",
+            r"^\s*(?:LibXR::PID<float>::Param|YawSmc::Param)\s+(\w+)\s*;",
         control_param_body,
         re.M,
     )
@@ -278,7 +279,7 @@ if not re.search(
     re.S,
 ):
     raise SystemExit("profile switch reset and target latch mismatch")
-if "SolveSmcYaw(control.yaw_smc, target_yaw_cmd_, target_yaw_dot_," not in header:
+if "control.yaw_smc.Calculate({.theta_rad = target_yaw_cmd_," not in header:
     raise SystemExit("Yaw control must always use the active profile SMC")
 patrol_case = re.search(
     r"case GimbalEvent::SET_MODE_AUTOPATROL:(.*?)(?=case GimbalEvent::)",
@@ -300,7 +301,7 @@ if patrol_case is None or any(
 # C++ 结构体默认值必须逐字段等于 manifest 默认值：两者分叉会让"省略键就用默认值"
 # 这件事失真（曾经 C++ 侧全零、manifest 侧是正增益，全零配置能通过校验 → 静默零增益）。
 check_cpp_defaults(
-    config_defaults(pathlib.Path(args.smc_algorithm).read_text(), "Config"),
+    config_defaults(pathlib.Path(args.smc_algorithm).read_text(), "Param"),
     SMC_EXPECTED_DEFAULTS,
     "SMC",
 )

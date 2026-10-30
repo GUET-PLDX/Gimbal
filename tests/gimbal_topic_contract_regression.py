@@ -91,6 +91,7 @@ for config_name in config_names:
     bmi088_args = {k: v for item in bmi088.get("args", []) for k, v in item.items()}
     bmi088_args = bmi088_args.get("param", bmi088_args)
     madgwick_args = {k: v for item in madgwick.get("args", []) for k, v in item.items()}
+    madgwick_args = madgwick_args.get("param", madgwick_args)
     gimbal_args = {k: v for item in gimbal.get("args", []) for k, v in item.items()}
     gimbal_param = gimbal_args.get("param", {})
     if list(gimbal_param) != param_fields:
