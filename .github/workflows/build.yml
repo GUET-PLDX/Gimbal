@@ -123,6 +123,7 @@ jobs:
       - name: Run Gimbal regression tests
         working-directory: Modules/${{ env.XR_MODULE_NAME }}
         run: |
+          bash tests/yaw_smc_host_regression.sh
           bash tests/two_axis_ik_host_regression.sh
           bash tests/system_identify_host_regression.sh
           bash tests/motor_online_ownership_regression.sh "$GITHUB_WORKSPACE/Modules"

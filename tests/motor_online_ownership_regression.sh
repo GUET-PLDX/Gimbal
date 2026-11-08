@@ -42,7 +42,9 @@ need "$GIMBAL_HEADER" 'motor_syaw_->IsOnline\(\)' \
   'IK controller queries small Yaw motor online state directly'
 need "$GIMBAL_HEADER" 'motor_pit_->IsOnline\(\)' \
   'IK controller queries Pitch motor online state directly'
-forbid "$GIMBAL_HEADER" 'yaw_smc|YawSmc' \
-  'removed Yaw SMC controller remains in Gimbal'
+need "$GIMBAL_HEADER" 'control\.yaw_smc\.Calculate\(' \
+  'large Yaw uses its SMC controller'
+need "$GIMBAL_HEADER" 'control\.syaw_smc\.Calculate\(' \
+  'small Yaw uses its SMC controller'
 
 echo 'PASS: motor online-state ownership regression checks'

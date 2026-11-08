@@ -17,6 +17,7 @@ depends:
 #include "Motor.hpp"
 #include "SystemIdentify.hpp"
 #include "TwoAxisIK.hpp"
+#include "YawSmc.hpp"
 #include "event.hpp"
 #include "libxr.hpp"
 #include "libxr_def.hpp"
@@ -48,28 +49,28 @@ static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_IDENTIFY) == 7U);
 class Gimbal {
 public:
   struct ControlParam {
-    LibXR::PID<float>::Param pid_yaw_angle;
-    LibXR::PID<float>::Param pid_yaw_omega;
     LibXR::PID<float>::Param pid_pit_angle;
     LibXR::PID<float>::Param pid_pit_omega;
+    YawSmc::Param yaw_smc;
+    YawSmc::Param syaw_smc;
   };
 
   struct YawFollowParam {
     bool enabled;
     float deadband_rad;
-    LibXR::PID<float>::Param pid_angle;
-    LibXR::PID<float>::Param pid_omega;
   };
 
   struct Param {
     uint32_t task_stack_depth;
     ControlParam manual;
     ControlParam auto_aim;
+    YawSmc::OutputLimits yaw_output_limits;
     TwoAxisIK::Config two_axis_ik;
     YawFollowParam yaw_follow;
     float pit_lc;
     float pit_theta;
     float j_pit;
+    float j_yaw;
     float j_syaw;
     float yaw_zero;
     float imu_timeout_s;
@@ -86,88 +87,32 @@ public:
 
   Gimbal(CMD &cmd, Motor &motor_pit, Motor &motor_yaw, Motor &motor_syaw,
          Motor &motor_fold,
-         const Param &param = {.task_stack_depth = 2048,
-                               .manual = {.pid_yaw_angle = {.k = 1.0f,
-                                                            .p = 0.0f,
-                                                            .i = 0.0f,
-                                                            .d = 0.0f,
-                                                            .i_limit = 0.0f,
-                                                            .out_limit = 0.0f,
-                                                            .cycle = true},
-                                          .pid_yaw_omega = {.k = 1.0f,
-                                                            .p = 0.0f,
-                                                            .i = 0.0f,
-                                                            .d = 0.0f,
-                                                            .i_limit = 0.0f,
-                                                            .out_limit = 0.0f,
-                                                            .cycle = false},
-                                          .pid_pit_angle = {.k = 1.0f,
-                                                            .p = 0.0f,
-                                                            .i = 0.0f,
-                                                            .d = 0.0f,
-                                                            .i_limit = 0.0f,
-                                                            .out_limit = 0.0f,
-                                                            .cycle = false},
-                                          .pid_pit_omega = {.k = 1.0f,
-                                                            .p = 0.0f,
-                                                            .i = 0.0f,
-                                                            .d = 0.0f,
-                                                            .i_limit = 0.0f,
-                                                            .out_limit = 0.0f,
-                                                            .cycle = false}},
-                               .auto_aim = {.pid_yaw_angle = {.k = 1.0f,
-                                                              .p = 0.0f,
-                                                              .i = 0.0f,
-                                                              .d = 0.0f,
-                                                              .i_limit = 0.0f,
-                                                              .out_limit = 0.0f,
-                                                              .cycle = true},
-                                            .pid_yaw_omega = {.k = 1.0f,
-                                                              .p = 0.0f,
-                                                              .i = 0.0f,
-                                                              .d = 0.0f,
-                                                              .i_limit = 0.0f,
-                                                              .out_limit = 0.0f,
-                                                              .cycle = false},
-                                            .pid_pit_angle = {.k = 1.0f,
-                                                              .p = 0.0f,
-                                                              .i = 0.0f,
-                                                              .d = 0.0f,
-                                                              .i_limit = 0.0f,
-                                                              .out_limit = 0.0f,
-                                                              .cycle = false},
-                                            .pid_pit_omega = {.k = 1.0f,
-                                                              .p = 0.0f,
-                                                              .i = 0.0f,
-                                                              .d = 0.0f,
-                                                              .i_limit = 0.0f,
-                                                              .out_limit = 0.0f,
-                                                              .cycle = false}},
-                               .two_axis_ik = {},
-                               .yaw_follow = {.enabled = false,
-                                              .deadband_rad = 0.0f,
-                                              .pid_angle = {},
-                                              .pid_omega = {}},
-                               .pit_lc = 0.0f,
-                               .pit_theta = 0.0f,
-                               .j_pit = 0.0f,
-                               .j_syaw = 0.0f,
-                               .yaw_zero = 0.0f,
-                               .imu_timeout_s = 0.05f,
-                               .patrol_pitch_amplitude_rad = 0.0f,
-                               .patrol_pitch_angular_rate_rad_s = 0.0f,
-                               .patrol_yaw_rate_rad_s = 0.0f,
-                               .patrol_imu_timeout_s = 0.05f,
-                               .thread_priority =
-                                   LibXR::Thread::Priority::MEDIUM,
-                               .system_identify = {},
-                               .euler_topic_name = "gimbal_euler",
-                               .gyro_topic_name = "gimbal_gyro",
-                               .gimbal_cmd_topic_name = "gimbal_cmd"})
-      : cmd_(cmd), PARAM(param), manual_control_(PARAM.manual),
-        auto_aim_control_(PARAM.auto_aim),
-        pid_yaw_follow_angle_(PARAM.yaw_follow.pid_angle),
-        pid_yaw_follow_omega_(PARAM.yaw_follow.pid_omega),
+         const Param &param =
+             Param{.task_stack_depth = 2048,
+                   .manual = {},
+                   .auto_aim = {},
+                   .yaw_output_limits = {},
+                   .two_axis_ik = {},
+                   .yaw_follow = {.enabled = false, .deadband_rad = 0.0f},
+                   .pit_lc = 0.0f,
+                   .pit_theta = 0.0f,
+                   .j_pit = 0.0f,
+                   .j_yaw = 0.0f,
+                   .j_syaw = 0.0f,
+                   .yaw_zero = 0.0f,
+                   .imu_timeout_s = 0.05f,
+                   .patrol_pitch_amplitude_rad = 0.0f,
+                   .patrol_pitch_angular_rate_rad_s = 0.0f,
+                   .patrol_yaw_rate_rad_s = 0.0f,
+                   .patrol_imu_timeout_s = 0.05f,
+                   .thread_priority = LibXR::Thread::Priority::MEDIUM,
+                   .system_identify = {},
+                   .euler_topic_name = "gimbal_euler",
+                   .gyro_topic_name = "gimbal_gyro",
+                   .gimbal_cmd_topic_name = "gimbal_cmd"})
+      : cmd_(cmd), PARAM(param),
+        manual_control_(PARAM.manual, PARAM.yaw_output_limits),
+        auto_aim_control_(PARAM.auto_aim, PARAM.yaw_output_limits),
         motor_yaw_(&motor_yaw), motor_pit_(&motor_pit),
         motor_syaw_(&motor_syaw), motor_fold_(&motor_fold),
         system_identify_(param.system_identify) {
@@ -279,9 +224,8 @@ public:
     if (current_mode_ != GimbalEvent::SET_MODE_RELAX &&
         (!SensorsValid() || !motor_syaw_->IsOnline() ||
          !motor_pit_->IsOnline() || motor_syaw_feedback_.state != 1 ||
-         motor_pit_feedback_.state != 1 ||
-         (PARAM.yaw_follow.enabled &&
-          (!motor_yaw_->IsOnline() || motor_yaw_feedback_.state != 1)))) {
+         motor_pit_feedback_.state != 1 || !motor_yaw_->IsOnline() ||
+         motor_yaw_feedback_.state != 1)) {
       target_initialized_ = false;
       if (euler_received_) {
         SyncTargetToFeedback();
@@ -301,8 +245,11 @@ public:
          current_mode_ == GimbalEvent::SET_VISION_BIG_BUFF);
     if (ai_active != ai_gimbal_reference_active_) {
       ai_gimbal_reference_active_ = ai_active;
-      ActiveControl().Reset();
+      ActiveControl().Reset(last_applied_yaw_torque_nm_,
+                            last_applied_syaw_torque_nm_);
       SyncTargetToFeedback();
+      target_yaw_rate_ref_ = 0.0f;
+      target_yaw_accel_ref_ = 0.0f;
       control_profile_just_changed_ = true;
     }
     if (control_profile_just_changed_) {
@@ -312,12 +259,16 @@ public:
     if (ctrl_mode == CMD::Mode::CMD_OP_CTRL) {
       target_world_.Yaw() += cmd_data_.yaw * dt_ * GIMBAL_MAX_SPEED;
       target_world_.Pitch() += cmd_data_.pit * dt_ * GIMBAL_MAX_SPEED;
+      target_yaw_rate_ref_ = 0.0f;
+      target_yaw_accel_ref_ = 0.0f;
       return;
     }
     if (ai_gimbal_reference_active_) {
       target_world_.Yaw() = cmd_data_.yaw;
       target_world_.Pitch() = cmd_data_.pit;
       target_world_.Roll() = cmd_data_.rol;
+      target_yaw_rate_ref_ = cmd_data_.yaw_dot;
+      target_yaw_accel_ref_ = cmd_data_.yaw_ddot;
       return;
     }
     if (current_mode_ == GimbalEvent::SET_MODE_AUTOPATROL) {
@@ -326,6 +277,8 @@ public:
     }
     target_world_.Yaw() -= cmd_data_.yaw * dt_ * GIMBAL_MAX_SPEED;
     target_world_.Pitch() += cmd_data_.pit * dt_ * GIMBAL_MAX_SPEED;
+    target_yaw_rate_ref_ = 0.0f;
+    target_yaw_accel_ref_ = 0.0f;
   }
 
   void Control() {
@@ -350,9 +303,6 @@ public:
       return;
     }
 
-    const float measured_yaw =
-        JointPosition(motor_syaw_feedback_, PARAM.two_axis_ik.yaw_sign,
-                      PARAM.two_axis_ik.yaw_zero_rad);
     const float measured_pitch =
         JointPosition(motor_pit_feedback_, PARAM.two_axis_ik.pitch_sign,
                       PARAM.two_axis_ik.pitch_zero_rad);
@@ -375,87 +325,147 @@ public:
                       PARAM.two_axis_ik.pitch_zero_rad);
 
     auto &control = ActiveControl();
-    const float yaw_speed_ref = std::clamp(
-        control.pid_yaw_angle.Calculate(yaw_joint_target, measured_yaw,
-                                        measured_yaw_rate, dt_) +
-            JointReferenceRate(yaw_joint_target, control.last_yaw_position,
-                               true, control.reference_primed),
-        -MAX_JOINT_SPEED_REF, MAX_JOINT_SPEED_REF);
+    const float measured_yaw =
+        JointPosition(motor_syaw_feedback_, PARAM.two_axis_ik.yaw_sign,
+                      PARAM.two_axis_ik.yaw_zero_rad);
+    const float syaw_rate_ref =
+        JointReferenceRate(yaw_joint_target, control.last_syaw_position, true,
+                           control.syaw_reference_primed);
+    const float syaw_accel_ref =
+        control.syaw_reference_primed
+            ? std::clamp((syaw_rate_ref - control.last_syaw_speed) / dt_,
+                         -MAX_JOINT_REFERENCE_ACCEL, MAX_JOINT_REFERENCE_ACCEL)
+            : 0.0f;
     const float pitch_speed_ref = std::clamp(
         control.pid_pit_angle.Calculate(pitch_joint_target, measured_pitch,
                                         measured_pitch_rate, dt_) +
             JointReferenceRate(pitch_joint_target, control.last_pitch_position,
-                               false, control.reference_primed),
+                               false, control.pitch_reference_primed),
         -MAX_JOINT_SPEED_REF, MAX_JOINT_SPEED_REF);
-    const float yaw_accel_ref =
-        control.reference_primed
-            ? std::clamp((yaw_speed_ref - control.last_yaw_speed) / dt_,
-                         -MAX_JOINT_REFERENCE_ACCEL, MAX_JOINT_REFERENCE_ACCEL)
-            : 0.0f;
     const float pitch_accel_ref =
-        control.reference_primed
+        control.pitch_reference_primed
             ? std::clamp((pitch_speed_ref - control.last_pitch_speed) / dt_,
                          -MAX_JOINT_REFERENCE_ACCEL, MAX_JOINT_REFERENCE_ACCEL)
             : 0.0f;
-    control.pid_yaw_omega.SetFeedForward(PARAM.j_syaw * yaw_accel_ref);
-    const float yaw_torque =
-        control.pid_yaw_omega.Calculate(yaw_speed_ref, measured_yaw_rate, dt_);
     control.pid_pit_omega.SetFeedForward(
         PARAM.j_pit * pitch_accel_ref -
         PARAM.pit_lc * std::sin(euler_.Pitch() + PARAM.pit_theta));
     const float pitch_torque = control.pid_pit_omega.Calculate(
         pitch_speed_ref, measured_pitch_rate, dt_);
-    control.last_yaw_speed = yaw_speed_ref;
+
+    float syaw_follow_error = measured_yaw;
+    if (PARAM.yaw_follow.enabled) {
+      if (!std::isfinite(PARAM.yaw_follow.deadband_rad) ||
+          PARAM.yaw_follow.deadband_rad < 0.0f ||
+          PARAM.yaw_follow.deadband_rad >= static_cast<float>(LibXR::PI)) {
+        RelaxAll();
+        return;
+      }
+      if (std::fabs(syaw_follow_error) <= PARAM.yaw_follow.deadband_rad) {
+        syaw_follow_error = 0.0f;
+      } else {
+        syaw_follow_error -=
+            std::copysign(PARAM.yaw_follow.deadband_rad, syaw_follow_error);
+      }
+    } else {
+      syaw_follow_error = 0.0f;
+    }
+    const float big_yaw_target =
+        PARAM.yaw_follow.enabled
+            ? static_cast<float>(motor_yaw_feedback_.abs_angle) +
+                  syaw_follow_error
+            : target_world_.Yaw();
+    const float big_yaw_rate =
+        PARAM.yaw_follow.enabled
+            ? motor_yaw_feedback_.omega +
+                  (syaw_follow_error == 0.0f ? 0.0f : measured_yaw_rate)
+            : target_yaw_rate_ref_;
+    const float big_yaw_accel =
+        PARAM.yaw_follow.enabled ? syaw_accel_ref : target_yaw_accel_ref_;
+    const auto big_yaw_output = control.yaw_smc.Calculate(
+        {.theta_rad = big_yaw_target,
+         .omega_rad_s = big_yaw_rate,
+         .alpha_rad_s2 = big_yaw_accel},
+        {.theta_rad = PARAM.yaw_follow.enabled
+                          ? static_cast<float>(motor_yaw_feedback_.abs_angle)
+                          : euler_.Yaw(),
+         .omega_rad_s = PARAM.yaw_follow.enabled ? motor_yaw_feedback_.omega
+                                                 : gyro_data_.z(),
+         .valid = motor_yaw_->IsOnline() && motor_yaw_feedback_.state == 1},
+        dt_, PARAM.j_yaw);
+    const auto small_yaw_output = control.syaw_smc.Calculate(
+        {.theta_rad = yaw_joint_target,
+         .omega_rad_s = syaw_rate_ref,
+         .alpha_rad_s2 = syaw_accel_ref},
+        {.theta_rad =
+             JointPosition(motor_syaw_feedback_, PARAM.two_axis_ik.yaw_sign,
+                           PARAM.two_axis_ik.yaw_zero_rad),
+         .omega_rad_s = measured_yaw_rate,
+         .valid = motor_syaw_->IsOnline() && motor_syaw_feedback_.state == 1},
+        dt_, PARAM.j_syaw);
+
     control.last_pitch_speed = pitch_speed_ref;
-    control.last_yaw_position = yaw_joint_target;
     control.last_pitch_position = pitch_joint_target;
-    control.reference_primed = true;
-    if (!std::isfinite(yaw_torque) || !std::isfinite(pitch_torque)) {
+    control.last_syaw_position = yaw_joint_target;
+    control.last_syaw_speed = syaw_rate_ref;
+    control.pitch_reference_primed = true;
+    control.syaw_reference_primed = true;
+    if (!big_yaw_output.valid || !small_yaw_output.valid ||
+        !std::isfinite(big_yaw_output.tau_cmd_nm) ||
+        !std::isfinite(small_yaw_output.tau_cmd_nm) ||
+        !std::isfinite(pitch_torque)) {
       RelaxAll();
       return;
     }
 
-    ControlMotor(motor_syaw_, motor_syaw_feedback_,
+    ControlMotor(motor_yaw_, motor_yaw_feedback_,
                  {.mode = Motor::ControlMode::MODE_TORQUE,
-                  .torque = PARAM.two_axis_ik.yaw_sign * yaw_torque});
+                  .torque = big_yaw_output.tau_cmd_nm});
+    ControlMotor(
+        motor_syaw_, motor_syaw_feedback_,
+        {.mode = Motor::ControlMode::MODE_TORQUE,
+         .torque = PARAM.two_axis_ik.yaw_sign * small_yaw_output.tau_cmd_nm});
     ControlMotor(motor_pit_, motor_pit_feedback_,
                  {.mode = Motor::ControlMode::MODE_TORQUE,
                   .torque = PARAM.two_axis_ik.pitch_sign * pitch_torque});
-    ControlBigYawFollow();
+    CommitAppliedBigYawTorque(big_yaw_output.tau_cmd_nm);
+    CommitAppliedSmallYawTorque(small_yaw_output.tau_cmd_nm);
   }
 
   LibXR::Event &GetEvent() { return gimbal_event_; }
 
 private:
   struct ControlState {
-    LibXR::PID<float> pid_yaw_angle;
-    LibXR::PID<float> pid_yaw_omega;
     LibXR::PID<float> pid_pit_angle;
     LibXR::PID<float> pid_pit_omega;
-    float last_yaw_speed = 0.0f;
+    YawSmc yaw_smc;
+    YawSmc syaw_smc;
     float last_pitch_speed = 0.0f;
-    float last_yaw_position = 0.0f;
     float last_pitch_position = 0.0f;
-    bool reference_primed = false;
+    float last_syaw_speed = 0.0f;
+    float last_syaw_position = 0.0f;
+    bool pitch_reference_primed = false;
+    bool syaw_reference_primed = false;
 
-    explicit ControlState(const ControlParam &param)
-        : pid_yaw_angle(param.pid_yaw_angle),
-          pid_yaw_omega(param.pid_yaw_omega),
-          pid_pit_angle(param.pid_pit_angle),
-          pid_pit_omega(param.pid_pit_omega) {}
+    ControlState(const ControlParam &param,
+                 const YawSmc::OutputLimits &output_limits)
+        : pid_pit_angle(param.pid_pit_angle),
+          pid_pit_omega(param.pid_pit_omega),
+          yaw_smc(param.yaw_smc, output_limits),
+          syaw_smc(param.syaw_smc, output_limits) {}
 
-    void Reset() {
-      pid_yaw_angle.Reset();
-      pid_yaw_omega.Reset();
+    void Reset(float applied_yaw_torque, float applied_syaw_torque) {
       pid_pit_angle.Reset();
       pid_pit_omega.Reset();
-      pid_yaw_omega.SetFeedForward(0.0f);
       pid_pit_omega.SetFeedForward(0.0f);
-      last_yaw_speed = 0.0f;
+      yaw_smc.Reset(applied_yaw_torque);
+      syaw_smc.Reset(applied_syaw_torque);
       last_pitch_speed = 0.0f;
-      last_yaw_position = 0.0f;
       last_pitch_position = 0.0f;
-      reference_primed = false;
+      last_syaw_speed = 0.0f;
+      last_syaw_position = 0.0f;
+      pitch_reference_primed = false;
+      syaw_reference_primed = false;
     }
   };
 
@@ -463,10 +473,9 @@ private:
   const Param PARAM;
   ControlState manual_control_;
   ControlState auto_aim_control_;
-  LibXR::PID<float> pid_yaw_follow_angle_;
-  LibXR::PID<float> pid_yaw_follow_omega_;
-  bool yaw_follow_active_ = false;
   bool big_yaw_relaxed_ = false;
+  float last_applied_yaw_torque_nm_ = 0.0f;
+  float last_applied_syaw_torque_nm_ = 0.0f;
   Motor *motor_yaw_;
   Motor *motor_pit_;
   Motor *motor_syaw_;
@@ -487,6 +496,8 @@ private:
   bool ai_gimbal_reference_active_ = false;
   bool control_profile_just_changed_ = false;
   bool target_initialized_ = false;
+  float target_yaw_rate_ref_ = 0.0f;
+  float target_yaw_accel_ref_ = 0.0f;
   bool identify_boot_checked_ = false;
   bool identify_relax_lock_ = false;
   GimbalEvent current_mode_ = GimbalEvent::SET_MODE_RELAX;
@@ -567,32 +578,27 @@ private:
     RelaxBigYaw();
     motor_pit_->Relax();
     motor_syaw_->Relax();
-    manual_control_.Reset();
-    auto_aim_control_.Reset();
-    pid_yaw_follow_angle_.Reset();
-    pid_yaw_follow_omega_.Reset();
-    yaw_follow_active_ = false;
+    manual_control_.Reset(0.0f, 0.0f);
+    auto_aim_control_.Reset(0.0f, 0.0f);
+    last_applied_yaw_torque_nm_ = 0.0f;
+    last_applied_syaw_torque_nm_ = 0.0f;
   }
 
   void ResetControls() {
-    manual_control_.Reset();
-    auto_aim_control_.Reset();
-    pid_yaw_follow_angle_.Reset();
-    pid_yaw_follow_omega_.Reset();
-    yaw_follow_active_ = false;
+    manual_control_.Reset(last_applied_yaw_torque_nm_,
+                          last_applied_syaw_torque_nm_);
+    auto_aim_control_.Reset(last_applied_yaw_torque_nm_,
+                            last_applied_syaw_torque_nm_);
   }
 
   bool MotorsReady() {
     const Motor::MotorCmd zero_torque{.mode = Motor::ControlMode::MODE_TORQUE};
+    ControlMotor(motor_yaw_, motor_yaw_feedback_, zero_torque);
     ControlMotor(motor_syaw_, motor_syaw_feedback_, zero_torque);
     ControlMotor(motor_pit_, motor_pit_feedback_, zero_torque);
-    if (PARAM.yaw_follow.enabled) {
-      ControlMotor(motor_yaw_, motor_yaw_feedback_, zero_torque);
-    }
     return motor_syaw_->IsOnline() && motor_pit_->IsOnline() &&
            motor_syaw_feedback_.state == 1 && motor_pit_feedback_.state == 1 &&
-           (!PARAM.yaw_follow.enabled ||
-            (motor_yaw_->IsOnline() && motor_yaw_feedback_.state == 1));
+           motor_yaw_->IsOnline() && motor_yaw_feedback_.state == 1;
   }
 
   void ControlMotor(Motor *motor, const Motor::Feedback &feedback,
@@ -618,50 +624,18 @@ private:
     }
   }
 
-  void ControlBigYawFollow() {
-    const auto &config = PARAM.yaw_follow;
-    if (!config.enabled) {
-      RelaxBigYaw();
-      pid_yaw_follow_angle_.Reset();
-      pid_yaw_follow_omega_.Reset();
-      yaw_follow_active_ = false;
+  void CommitAppliedBigYawTorque(float torque) {
+    if (!std::isfinite(torque))
       return;
-    }
-    if (!motor_yaw_->IsOnline() || motor_yaw_feedback_.state != 1 ||
-        !motor_syaw_->IsOnline() || motor_syaw_feedback_.state != 1 ||
-        !std::isfinite(config.deadband_rad) || config.deadband_rad < 0.0f ||
-        config.deadband_rad >= static_cast<float>(LibXR::PI) ||
-        !std::isfinite(motor_yaw_feedback_.omega)) {
-      RelaxBigYaw();
-      pid_yaw_follow_angle_.Reset();
-      pid_yaw_follow_omega_.Reset();
-      yaw_follow_active_ = false;
+    last_applied_yaw_torque_nm_ = torque;
+    ActiveControl().yaw_smc.CommitAppliedTorque(torque);
+  }
+
+  void CommitAppliedSmallYawTorque(float torque) {
+    if (!std::isfinite(torque))
       return;
-    }
-    float error =
-        JointPosition(motor_syaw_feedback_, PARAM.two_axis_ik.yaw_sign,
-                      PARAM.two_axis_ik.yaw_zero_rad);
-    if (std::fabs(error) <= config.deadband_rad) {
-      error = 0.0f;
-    } else {
-      error -= std::copysign(config.deadband_rad, error);
-    }
-    if (!yaw_follow_active_) {
-      pid_yaw_follow_angle_.Reset();
-      pid_yaw_follow_omega_.Reset();
-      yaw_follow_active_ = true;
-    }
-    const float speed = pid_yaw_follow_angle_.Calculate(
-        0.0f, -error, -PARAM.two_axis_ik.yaw_sign * motor_syaw_feedback_.omega,
-        dt_);
-    const float torque =
-        pid_yaw_follow_omega_.Calculate(speed, motor_yaw_feedback_.omega, dt_);
-    if (!std::isfinite(speed) || !std::isfinite(torque)) {
-      RelaxBigYaw();
-      return;
-    }
-    ControlMotor(motor_yaw_, motor_yaw_feedback_,
-                 {.mode = Motor::ControlMode::MODE_TORQUE, .torque = torque});
+    last_applied_syaw_torque_nm_ = torque;
+    ActiveControl().syaw_smc.CommitAppliedTorque(torque);
   }
 
   void UpdatePatrol() {
@@ -674,6 +648,8 @@ private:
         !std::isfinite(PARAM.patrol_yaw_rate_rad_s)) {
       SyncTargetToFeedback();
       patrol_elapsed_s_ = 0.0f;
+      target_yaw_rate_ref_ = 0.0f;
+      target_yaw_accel_ref_ = 0.0f;
       return;
     }
     patrol_elapsed_s_ += dt_;
@@ -681,6 +657,8 @@ private:
         std::clamp(PARAM.patrol_yaw_rate_rad_s - patrol_yaw_rate_,
                    -MAX_PATROL_YAW_ACCEL * dt_, MAX_PATROL_YAW_ACCEL * dt_);
     target_world_.Yaw() += patrol_yaw_rate_ * dt_;
+    target_yaw_rate_ref_ = patrol_yaw_rate_;
+    target_yaw_accel_ref_ = 0.0f;
     target_world_.Pitch() =
         euler_.Pitch() +
         PARAM.patrol_pitch_amplitude_rad *
@@ -759,8 +737,10 @@ private:
     current_mode_ = event;
     patrol_elapsed_s_ = 0.0f;
     patrol_yaw_rate_ = 0.0f;
-    manual_control_.Reset();
-    auto_aim_control_.Reset();
+    manual_control_.Reset(last_applied_yaw_torque_nm_,
+                          last_applied_syaw_torque_nm_);
+    auto_aim_control_.Reset(last_applied_yaw_torque_nm_,
+                            last_applied_syaw_torque_nm_);
     SyncTargetToFeedback();
     target_initialized_ = false;
     if (event == GimbalEvent::SET_MODE_RELAX) {
