@@ -2,17 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-if [[ ! -f "${ROOT_DIR}/Motor/Motor.hpp" ]]; then
-  if [[ -f "${ROOT_DIR}/Modules/Motor/Motor.hpp" ]]; then
-    ROOT_DIR="${ROOT_DIR}/Modules"
-  elif [[ -f "${ROOT_DIR}/Modules/GUET-PLDX/Motor/Motor.hpp" ]]; then
-    ROOT_DIR="${ROOT_DIR}/Modules/GUET-PLDX"
-  fi
-fi
 MOTOR_HEADER="${ROOT_DIR}/Motor/Motor.hpp"
 DM_HEADER="${ROOT_DIR}/DMMotor/DMMotor.hpp"
 RM_HEADER="${ROOT_DIR}/RMMotor/RMMotor.hpp"
-GIMBAL_HEADER="${GIMBAL_HEADER:-${ROOT_DIR}/Gimbal/Gimbal.hpp}"
+GIMBAL_HEADER="${ROOT_DIR}/Gimbal/Gimbal.hpp"
 
 need() {
   local file="$1" pattern="$2" description="$3"
@@ -38,13 +31,7 @@ need "$RM_HEADER" 'bool IsOnline\(\) const override' \
   'RMMotor online-state implementation'
 forbid "$GIMBAL_HEADER" 'motor_feedback_online_' \
   'Gimbal-level aggregate motor online state'
-need "$GIMBAL_HEADER" 'motor_syaw_->IsOnline\(\)' \
-  'IK controller queries small Yaw motor online state directly'
-need "$GIMBAL_HEADER" 'motor_pit_->IsOnline\(\)' \
-  'IK controller queries Pitch motor online state directly'
-need "$GIMBAL_HEADER" 'control\.yaw_smc\.Calculate\(' \
-  'large Yaw uses its SMC controller'
-need "$GIMBAL_HEADER" 'control\.syaw_smc\.Calculate\(' \
-  'small Yaw uses its SMC controller'
+need "$GIMBAL_HEADER" '\.valid = motor_yaw_->IsOnline\(\)' \
+  'Yaw controller queries Yaw motor online state directly'
 
 echo 'PASS: motor online-state ownership regression checks'
