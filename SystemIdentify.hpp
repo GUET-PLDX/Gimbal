@@ -222,7 +222,7 @@ class SystemIdentify final {
 
   /**
    * @brief 用锁存的配置构造辨识器。
-   * @note 不提供默认构造：与 YawSmc/YawLqrEso 同范式，完美转发 + requires
+   * @note 不提供默认构造：使用完美转发和 requires 约束配置类型。
    *       防止劫持隐式拷贝构造。
    */
   template <typename ConfigType>

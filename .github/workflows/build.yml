@@ -124,7 +124,9 @@ jobs:
         working-directory: Modules/${{ env.XR_MODULE_NAME }}
         run: |
           bash tests/yaw_smc_host_regression.sh
+          bash tests/two_axis_ik_host_regression.sh
           bash tests/system_identify_host_regression.sh
+          bash tests/motor_online_ownership_regression.sh "$GITHUB_WORKSPACE/Modules"
 
       - name: Run xrobot_setup
         run: |
@@ -139,6 +141,8 @@ jobs:
           xrobot_add_mod BlinkLED --instance-id BlinkLED_0
           xrobot_add_mod RMMotor --instance-id motor_pit
           xrobot_add_mod RMMotor --instance-id motor_yaw
+          xrobot_add_mod RMMotor --instance-id motor_syaw
+          xrobot_add_mod RMMotor --instance-id motor_fold
           xrobot_add_mod BMI088 --instance-id bmi088
           xrobot_add_mod MadgwickAHRS --instance-id ahrs
           xrobot_add_mod CMD --instance-id cmd
