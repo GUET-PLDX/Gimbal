@@ -47,6 +47,7 @@ source = pathlib.Path(args.header).read_text()
 param_defaults = {
     "euler_topic_name": "gimbal_euler",
     "gyro_topic_name": "gimbal_gyro",
+    "quaternion_topic_name": "ahrs_quaternion",
     "gimbal_cmd_topic_name": "gimbal_cmd",
 }
 param_block = re.search(r"struct Param\s*\{(.*?)\n\s*\};", source, re.S).group(1)
@@ -103,6 +104,7 @@ for config_name in config_names:
         ("BMI088", bmi088_args, "gyro_topic_name"),
         ("MadgwickAHRS", madgwick_args, "gyro_topic_name"),
         ("MadgwickAHRS", madgwick_args, "euler_topic_name"),
+        ("MadgwickAHRS", madgwick_args, "quaternion_topic_name"),
     )
     missing = [
         f"{module_name}.{field_name}"
@@ -118,6 +120,8 @@ for config_name in config_names:
     bmi088_gyro = topic_name(bmi088_args["gyro_topic_name"])
     madgwick_gyro = topic_name(madgwick_args["gyro_topic_name"])
     madgwick_euler = topic_name(madgwick_args["euler_topic_name"])
+    if topic_name(madgwick_args["quaternion_topic_name"]) != gimbal_topics["quaternion_topic_name"]:
+        failures.append(f"{config_name}: Gimbal quaternion Topic differs from AHRS")
     if madgwick_gyro != bmi088_gyro:
         failures.append(
             f"{config_name}: Madgwick gyro {madgwick_gyro!r} != "

@@ -17,12 +17,13 @@ PATROL_KEYS = (
     "patrol_pitch_angular_rate_rad_s",
     "patrol_yaw_rate_rad_s",
 )
-PATROL_VALUES = {
-    "patrol_pitch_amplitude_rad": 0.455,
-    "patrol_pitch_angular_rate_rad_s": 10.0,
-    "patrol_yaw_rate_rad_s": 1.0,
-}
 LEGACY_PATROL_KEYS = {"patrol_range", "patrol_omega"}
+
+KINEMATICS_DEFAULTS = {
+    "yaw_direction": 1.0,
+    "pitch_direction": -1.0,
+    "reference_cutoff_hz": 30.0,
+}
 
 
 
@@ -122,6 +123,7 @@ GIMBAL_PARAM_FIELDS = (
     "j_yaw",
     "pit_zero",
     "yaw_zero",
+    "kinematics",
     "patrol_pitch_amplitude_rad",
     "patrol_pitch_angular_rate_rad_s",
     "patrol_yaw_rate_rad_s",
@@ -130,6 +132,7 @@ GIMBAL_PARAM_FIELDS = (
     "system_identify",
     "euler_topic_name",
     "gyro_topic_name",
+    "quaternion_topic_name",
     "gimbal_cmd_topic_name",
 )
 
@@ -241,7 +244,7 @@ param_body = re.search(r"struct Param\s*\{(.*?)\n\s*\};", header, re.S).group(1)
 param_fields = tuple(
     re.findall(
         r"^\s*(?:uint32_t|ControlParam|YawSmc::OutputLimits|float|bool|"
-        r"LibXR::Thread::Priority|SystemIdentify::Config|const char\*)\s+(\w+)\s*;",
+        r"LibXR::Thread::Priority|SystemIdentify::Config|GimbalKinematics::Config|const char\*)\s+(\w+)\s*;",
         param_body,
         re.M,
     )
@@ -272,7 +275,8 @@ if not re.search(
 ):
     raise SystemExit("AI profile activation gate mismatch")
 if not re.search(
-    r"if \(AI_ACTIVE != ai_gimbal_reference_active_\) \{.*?"
+    r"if \(AI_ACTIVE != ai_gimbal_reference_active_ \|\|\s*"
+    r"JOINT_ACTIVE != joint_space_active_\) \{.*?"
     r"ai_gimbal_reference_active_ = AI_ACTIVE;.*?"
     r"control_profile_just_changed_ = true;",
     header,
@@ -289,7 +293,7 @@ patrol_case = re.search(
 if patrol_case is None or any(
     token not in patrol_case.group(1)
     for token in (
-        "ActiveControl().Reset(",
+        "ResetActiveControl();",
         "target_yaw_cmd_ = euler_.Yaw();",
         "target_pit_cmd_ = euler_.Pitch();",
         "target_yaw_ddot_ = 0.0f;",
@@ -318,6 +322,11 @@ check_cpp_defaults(
     SYSID_EXPECTED_DEFAULTS,
     "SYSID",
 )
+check_cpp_defaults(
+    config_defaults((MODULE_ROOT / "GimbalKinematics.hpp").read_text(), "Config"),
+    KINEMATICS_DEFAULTS,
+    "Kinematics",
+)
 
 if not args.header_only:
     if args.config is None:
@@ -332,9 +341,18 @@ if not args.header_only:
     target_gimbal_param = gimbal_args[GIMBAL_PARAM_KEY]
     if tuple(target_gimbal_param.keys()) != GIMBAL_PARAM_FIELDS:
         raise SystemExit("target Gimbal Param order mismatch")
-    for key, expected_value in PATROL_VALUES.items():
-        if target_gimbal_param.get(key) != expected_value:
-            raise SystemExit(f"target YAML patrol value mismatch: {key}")
+    # Patrol values are robot calibration, not fixed module defaults.
+    for key in PATROL_KEYS:
+        if not math.isfinite(target_gimbal_param[key]):
+            raise SystemExit(f"target YAML patrol value must be finite: {key}")
+    kinematics_yaml = target_gimbal_param["kinematics"]
+    if tuple(kinematics_yaml) != tuple(KINEMATICS_DEFAULTS):
+        raise SystemExit("kinematics YAML order mismatch")
+    for axis in ("yaw_direction", "pitch_direction"):
+        if kinematics_yaml[axis] not in (-1.0, 1.0):
+            raise SystemExit(f"{axis} must be +1 or -1")
+    if not math.isfinite(kinematics_yaml["reference_cutoff_hz"]) or kinematics_yaml["reference_cutoff_hz"] <= 0:
+        raise SystemExit("reference cutoff must be finite and positive")
     if "ai_yaw_lqr_eso_enable" in gimbal_args:
         raise SystemExit("removed route master remains in target YAML")
     target_gimbal_param = gimbal_args[GIMBAL_PARAM_KEY]
@@ -383,5 +401,7 @@ if not args.header_only:
             raise SystemExit("generated shared Yaw output limits aggregate mismatch")
         if sysid_expected not in generated:
             raise SystemExit("generated SYSID aggregate mismatch")
+        if designated(kinematics_yaml, KINEMATICS_DEFAULTS) not in generated:
+            raise SystemExit("generated kinematics aggregate mismatch")
 
 print("PASS: Gimbal config order regression")
