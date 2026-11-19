@@ -12,6 +12,7 @@ depends:
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 #include "CMD.hpp"
 #include "Motor.hpp"
@@ -64,17 +65,6 @@ class Gimbal {
     const char *big_yaw_gyro_topic_name;
   };
 
-  // Header-local patrol configuration keeps the existing XRobot constructor and
-  // YAML positional Param layout unchanged.
-  static constexpr PatrolParam PATROL{
-      .big_yaw_period_s = 4.0f,
-      .small_yaw_amplitude_rad = 35.0f * static_cast<float>(LibXR::PI / 180.0),
-      .small_yaw_period_s = 1.5f,
-      .pitch_amplitude_rad = 20.0f * static_cast<float>(LibXR::PI / 180.0),
-      .pitch_period_s = 1.5f,
-      .big_yaw_euler_topic_name = "big_yaw_euler",
-      .big_yaw_gyro_topic_name = "base_gyro"};
-
   struct Param {
     uint32_t task_stack_depth;
     ControlParam manual;
@@ -101,6 +91,7 @@ class Gimbal {
     const char *euler_topic_name;
     const char *gyro_topic_name;
     const char *gimbal_cmd_topic_name;
+    PatrolParam patrol;
   };
 
   Gimbal(CMD &cmd, Motor &motor_pit, Motor &motor_yaw, Motor &motor_syaw,
@@ -128,7 +119,8 @@ class Gimbal {
                    .system_identify = {},
                    .euler_topic_name = "gimbal_euler",
                    .gyro_topic_name = "gimbal_gyro",
-                   .gimbal_cmd_topic_name = "gimbal_cmd"})
+                   .gimbal_cmd_topic_name = "gimbal_cmd",
+                   .patrol = {}})
       : cmd_(cmd),
         PARAM(param),
         manual_control_(PARAM.manual, PARAM.yaw_output_limits),
@@ -167,16 +159,22 @@ class Gimbal {
         gimbal->PARAM.euler_topic_name);
     LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>> gyro_suber(
         gimbal->PARAM.gyro_topic_name);
-    LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>> big_yaw_euler_suber(
-        gimbal->PATROL.big_yaw_euler_topic_name);
-    LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>>
-        big_yaw_gyro_suber(gimbal->PATROL.big_yaw_gyro_topic_name);
+    std::optional<LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>>>
+        big_yaw_euler_suber;
+    std::optional<LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>>>
+        big_yaw_gyro_suber;
+    if (gimbal->PARAM.patrol.big_yaw_euler_topic_name &&
+        gimbal->PARAM.patrol.big_yaw_gyro_topic_name) {
+      big_yaw_euler_suber.emplace(
+          gimbal->PARAM.patrol.big_yaw_euler_topic_name);
+      big_yaw_gyro_suber.emplace(gimbal->PARAM.patrol.big_yaw_gyro_topic_name);
+      big_yaw_euler_suber->StartWaiting();
+      big_yaw_gyro_suber->StartWaiting();
+    }
 
     cmd_suber.StartWaiting();
     euler_suber.StartWaiting();
     gyro_suber.StartWaiting();
-    big_yaw_euler_suber.StartWaiting();
-    big_yaw_gyro_suber.StartWaiting();
 
     gimbal->last_online_time_ = LibXR::Timebase::GetMicroseconds();
 
@@ -201,15 +199,15 @@ class Gimbal {
         gimbal->gyro_received_ = true;
         gyro_suber.StartWaiting();
       }
-      if (big_yaw_euler_suber.Available()) {
-        gimbal->big_yaw_euler_ = big_yaw_euler_suber.GetData();
+      if (big_yaw_euler_suber && big_yaw_euler_suber->Available()) {
+        gimbal->big_yaw_euler_ = big_yaw_euler_suber->GetData();
         gimbal->big_yaw_euler_received_ = true;
-        big_yaw_euler_suber.StartWaiting();
+        big_yaw_euler_suber->StartWaiting();
       }
-      if (big_yaw_gyro_suber.Available()) {
-        gimbal->big_yaw_gyro_ = big_yaw_gyro_suber.GetData();
+      if (big_yaw_gyro_suber && big_yaw_gyro_suber->Available()) {
+        gimbal->big_yaw_gyro_ = big_yaw_gyro_suber->GetData();
         gimbal->big_yaw_gyro_received_ = true;
-        big_yaw_gyro_suber.StartWaiting();
+        big_yaw_gyro_suber->StartWaiting();
       }
       gimbal->Update();
       gimbal->ParseCMD();
@@ -272,16 +270,16 @@ class Gimbal {
       target_world_pitch_ = euler_.Pitch();
       if (current_mode_ == GimbalEvent::SET_MODE_AUTOPATROL) {
         const float big_rate =
-            static_cast<float>(LibXR::TWO_PI) / PATROL.big_yaw_period_s;
-        const float joint_rate =
-            4.0f * PATROL.small_yaw_amplitude_rad / PATROL.small_yaw_period_s;
+            static_cast<float>(LibXR::TWO_PI) / PARAM.patrol.big_yaw_period_s;
+        const float joint_rate = 4.0f * PARAM.patrol.small_yaw_amplitude_rad /
+                                 PARAM.patrol.small_yaw_period_s;
         patrol_sweep_rate_ =
             (joint_rate + std::hypot(joint_rate, 2.0f * big_rate)) / 2.0f;
-        patrol_forward_time_s_ = PATROL.small_yaw_period_s *
+        patrol_forward_time_s_ = PARAM.patrol.small_yaw_period_s *
                                  (1.0f + big_rate / patrol_sweep_rate_) / 2.0f;
         patrol_relative_ref_ = small_yaw_relative_angle_;
         patrol_yaw_phase_s_ =
-            (patrol_relative_ref_ + PATROL.small_yaw_amplitude_rad) /
+            (patrol_relative_ref_ + PARAM.patrol.small_yaw_amplitude_rad) /
             (patrol_sweep_rate_ - big_rate);
         target_big_world_yaw_ = big_yaw_euler_.Yaw();
         target_world_pitch_ = 0.0f;
@@ -321,19 +319,19 @@ class Gimbal {
         return;
       }
       const float big_rate =
-          static_cast<float>(LibXR::TWO_PI) / PATROL.big_yaw_period_s;
+          static_cast<float>(LibXR::TWO_PI) / PARAM.patrol.big_yaw_period_s;
       patrol_yaw_phase_s_ =
-          std::fmod(patrol_yaw_phase_s_ + dt_, PATROL.small_yaw_period_s);
+          std::fmod(patrol_yaw_phase_s_ + dt_, PARAM.patrol.small_yaw_period_s);
       const bool forward = patrol_yaw_phase_s_ < patrol_forward_time_s_;
       const float relative_ref =
-          forward
-              ? -PATROL.small_yaw_amplitude_rad +
-                    2.0f * PATROL.small_yaw_amplitude_rad *
-                        patrol_yaw_phase_s_ / patrol_forward_time_s_
-              : PATROL.small_yaw_amplitude_rad -
-                    2.0f * PATROL.small_yaw_amplitude_rad *
-                        (patrol_yaw_phase_s_ - patrol_forward_time_s_) /
-                        (PATROL.small_yaw_period_s - patrol_forward_time_s_);
+          forward ? -PARAM.patrol.small_yaw_amplitude_rad +
+                        2.0f * PARAM.patrol.small_yaw_amplitude_rad *
+                            patrol_yaw_phase_s_ / patrol_forward_time_s_
+                  : PARAM.patrol.small_yaw_amplitude_rad -
+                        2.0f * PARAM.patrol.small_yaw_amplitude_rad *
+                            (patrol_yaw_phase_s_ - patrol_forward_time_s_) /
+                            (PARAM.patrol.small_yaw_period_s -
+                             patrol_forward_time_s_);
       // Integrate both world references from their own IMU origins. The
       // relative increment keeps the encoder-defined sweep independent of their
       // yaw zeros.
@@ -347,10 +345,11 @@ class Gimbal {
       // Ideal velocity steps have no finite acceleration impulse feedforward.
       target_yaw_accel_ref_ = 0.0f;
       patrol_elapsed_s_ =
-          std::fmod(patrol_elapsed_s_ + dt_, PATROL.pitch_period_s);
-      target_world_pitch_ = PATROL.pitch_amplitude_rad *
-                            std::sin(static_cast<float>(LibXR::TWO_PI) *
-                                     patrol_elapsed_s_ / PATROL.pitch_period_s);
+          std::fmod(patrol_elapsed_s_ + dt_, PARAM.patrol.pitch_period_s);
+      target_world_pitch_ =
+          PARAM.patrol.pitch_amplitude_rad *
+          std::sin(static_cast<float>(LibXR::TWO_PI) * patrol_elapsed_s_ /
+                   PARAM.patrol.pitch_period_s);
       return;
     }
     const float yaw_delta = cmd_data_.yaw * dt_ * GIMBAL_MAX_SPEED;
@@ -419,7 +418,7 @@ class Gimbal {
             {.theta_rad = patrol ? target_big_world_yaw_
                                  : big_yaw_angle + syaw_follow_error,
              .omega_rad_s = patrol ? static_cast<float>(LibXR::TWO_PI) /
-                                         PATROL.big_yaw_period_s
+                                         PARAM.patrol.big_yaw_period_s
                                    : motor_yaw_feedback_.omega +
                                          (syaw_follow_error == 0.0f
                                               ? 0.0f
@@ -671,15 +670,17 @@ class Gimbal {
   void SetMode(GimbalEvent event) {
     if (event == GimbalEvent::SET_MODE_AUTOPATROL &&
         (cmd_.GetCtrlMode() != CMD::Mode::CMD_AUTO_CTRL ||
-         !std::isfinite(PATROL.big_yaw_period_s) ||
-         PATROL.big_yaw_period_s <= 0.0f ||
-         !std::isfinite(PATROL.small_yaw_amplitude_rad) ||
-         PATROL.small_yaw_amplitude_rad <= 0.0f ||
-         !std::isfinite(PATROL.small_yaw_period_s) ||
-         PATROL.small_yaw_period_s <= 0.0f ||
-         !std::isfinite(PATROL.pitch_amplitude_rad) ||
-         !std::isfinite(PATROL.pitch_period_s) ||
-         PATROL.pitch_period_s <= 0.0f)) {
+         !PARAM.patrol.big_yaw_euler_topic_name ||
+         !PARAM.patrol.big_yaw_gyro_topic_name ||
+         !std::isfinite(PARAM.patrol.big_yaw_period_s) ||
+         PARAM.patrol.big_yaw_period_s <= 0.0f ||
+         !std::isfinite(PARAM.patrol.small_yaw_amplitude_rad) ||
+         PARAM.patrol.small_yaw_amplitude_rad <= 0.0f ||
+         !std::isfinite(PARAM.patrol.small_yaw_period_s) ||
+         PARAM.patrol.small_yaw_period_s <= 0.0f ||
+         !std::isfinite(PARAM.patrol.pitch_amplitude_rad) ||
+         !std::isfinite(PARAM.patrol.pitch_period_s) ||
+         PARAM.patrol.pitch_period_s <= 0.0f)) {
       return;
     }
     if (identify_relax_lock_ && event != GimbalEvent::SET_MODE_RELAX) {
