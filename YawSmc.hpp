@@ -306,8 +306,9 @@ class YawSmc final {
            std::isfinite(output.tau_cmd_nm);
   }
 
-  const OutputLimits output_limits_{};
   float last_applied_torque_nm_{};
   float slew_anchor_torque_nm_{};
   bool slew_primed_{};  ///< 首周期 slew anchor 播种标志
+
+  const OutputLimits output_limits_{};
 };

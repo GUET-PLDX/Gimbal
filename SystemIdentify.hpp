@@ -351,13 +351,11 @@ class SystemIdentify final {
   static constexpr float INNOVATION_LIMIT_NM = 2.0f;
   static constexpr float CONVERGED_RESIDUAL_RATIO = 0.1f;
 
-  const Config config_;
-  RlsIdent<3> rls_yaw_;  ///< [J, B, tau_c]
-  RlsIdent<5> rls_pit_;  ///< [J, B, tau_c, g_s, g_c]
-
   IdentifyState state_ = IdentifyState::IDLE;
   IdentifyAbort abort_reason_ = IdentifyAbort::NONE;
   float state_time_s_ = 0.0f;
+  AxisResult yaw_result_{};
+  AxisResult pit_result_{};
 
   // 滤波链状态（仅激励期使用，进入 EXCITE 时播种）。
   // omega/tau 两级级联 LPF，alpha 取二级滤波后 omega 的差分：
@@ -382,8 +380,9 @@ class SystemIdentify final {
   float signal_sq_sum_ = 0.0f;
   uint32_t update_count_ = 0;
 
-  AxisResult yaw_result_{};
-  AxisResult pit_result_{};
+  const Config config_;
+  RlsIdent<3> rls_yaw_;  ///< [J, B, tau_c]
+  RlsIdent<5> rls_pit_;  ///< [J, B, tau_c, g_s, g_c]
 
   float LpfAlpha(float dt_s) const {
     const float RC =

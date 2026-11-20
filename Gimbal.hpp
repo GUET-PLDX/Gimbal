@@ -549,49 +549,58 @@ class Gimbal {
     }
   };
 
-  CMD &cmd_;
-  const Param PARAM;
-  ControlState manual_control_;
-  ControlState auto_aim_control_;
-  bool big_yaw_relaxed_ = false;
-  float last_applied_yaw_torque_nm_ = 0.0f;
-  float last_applied_syaw_torque_nm_ = 0.0f;
-  Motor *motor_yaw_;
-  Motor *motor_pit_;
-  Motor *motor_syaw_;
-  Motor *motor_fold_;
-  Motor::Feedback motor_yaw_feedback_{};
-  Motor::Feedback motor_pit_feedback_{};
-  Motor::Feedback motor_syaw_feedback_{};
   CMD::GimbalCMD cmd_data_{};
-  Eigen::Matrix<float, 3, 1> gyro_data_ = Eigen::Matrix<float, 3, 1>::Zero();
+  LibXR::MicrosecondTimestamp last_online_time_{};
+  float dt_ = 0.0f;
+
+  float target_world_yaw_ = 0.0f;
+  float target_big_world_yaw_ = 0.0f;
+  float target_world_pitch_ = 0.0f;
+  float target_yaw_rate_ref_ = 0.0f;
+  float target_yaw_accel_ref_ = 0.0f;
+  bool target_initialized_ = false;
+
   LibXR::EulerAngle<float> euler_;
+  Eigen::Matrix<float, 3, 1> gyro_data_ = Eigen::Matrix<float, 3, 1>::Zero();
   bool euler_received_ = false;
   bool gyro_received_ = false;
   LibXR::EulerAngle<float> big_yaw_euler_;
   Eigen::Matrix<float, 3, 1> big_yaw_gyro_ = Eigen::Matrix<float, 3, 1>::Zero();
   bool big_yaw_euler_received_ = false;
   bool big_yaw_gyro_received_ = false;
-  LibXR::MicrosecondTimestamp last_online_time_{};
-  float target_world_yaw_ = 0.0f;
-  float target_world_pitch_ = 0.0f;
-  float pitch_relative_angle_ = 0.0f;
+
   float small_yaw_relative_angle_ = 0.0f;
-  SystemIdentify system_identify_;
+  float pitch_relative_angle_ = 0.0f;
+  Motor::Feedback motor_yaw_feedback_{};
+  Motor::Feedback motor_syaw_feedback_{};
+  Motor::Feedback motor_pit_feedback_{};
+
+  bool big_yaw_relaxed_ = false;
+  float last_applied_yaw_torque_nm_ = 0.0f;
+  float last_applied_syaw_torque_nm_ = 0.0f;
+
   bool ai_gimbal_reference_active_ = false;
   AutoAimYawStatus auto_aim_yaw_;
-  bool target_initialized_ = false;
-  float target_yaw_rate_ref_ = 0.0f;
-  float target_yaw_accel_ref_ = 0.0f;
-  bool identify_boot_checked_ = false;
-  bool identify_relax_lock_ = false;
-  float dt_ = 0.0f;
+
   float patrol_elapsed_s_ = 0.0f;
   float patrol_yaw_phase_s_ = 0.0f;
   float patrol_relative_ref_ = 0.0f;
   float patrol_sweep_rate_ = 0.0f;
   float patrol_forward_time_s_ = 0.0f;
-  float target_big_world_yaw_ = 0.0f;
+
+  bool identify_boot_checked_ = false;
+  bool identify_relax_lock_ = false;
+
+  CMD& cmd_;
+  const Param PARAM;
+  ControlState manual_control_;
+  ControlState auto_aim_control_;
+
+  Motor* motor_yaw_;
+  Motor* motor_pit_;
+  Motor* motor_syaw_;
+  Motor* motor_fold_;
+  SystemIdentify system_identify_;
 
   static constexpr float GIMBAL_MAX_SPEED =
       static_cast<float>(LibXR::TWO_PI) * 2.0f;
