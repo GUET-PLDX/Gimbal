@@ -77,7 +77,7 @@ class Gimbal {
     uint32_t task_stack_depth;
     ControlParam manual;
     ControlParam auto_aim;
-    YawSmc::OutputLimits yaw_output_limits;
+    float yaw_torque_limit_nm;
     float syaw_zero;
     float pit_zero;
     float pitch_min_rad;
@@ -117,7 +117,7 @@ class Gimbal {
              Param{.task_stack_depth = 2048,
                    .manual = {},
                    .auto_aim = {},
-                   .yaw_output_limits = {},
+                   .yaw_torque_limit_nm = 2.0f,
                    .syaw_zero = 0.0f,
                    .pit_zero = 0.0f,
                    .pitch_min_rad = -static_cast<float>(LibXR::PI / 2.0),
@@ -141,8 +141,8 @@ class Gimbal {
                    .auto_aim_recenter = {}})
       : cmd_(cmd),
         PARAM(param),
-        manual_control_(PARAM.manual, PARAM.yaw_output_limits),
-        auto_aim_control_(PARAM.auto_aim, PARAM.yaw_output_limits),
+        manual_control_(PARAM.manual, PARAM.yaw_torque_limit_nm),
+        auto_aim_control_(PARAM.auto_aim, PARAM.yaw_torque_limit_nm),
         motor_yaw_(&motor_yaw),
         motor_pit_(&motor_pit),
         motor_syaw_(&motor_syaw),
@@ -322,8 +322,8 @@ class Gimbal {
          current_mode_ == GimbalEvent::SET_VISION_BIG_BUFF);
     if (ai_active != ai_gimbal_reference_active_) {
       ai_gimbal_reference_active_ = ai_active;
-      auto &control = ai_active ? auto_aim_control_ : manual_control_;
-      control.Reset(last_applied_yaw_torque_nm_, last_applied_syaw_torque_nm_);
+      auto& control = ai_active ? auto_aim_control_ : manual_control_;
+      control.Reset();
       target_world_yaw_ = euler_.Yaw();
       target_world_pitch_ = euler_.Pitch();
       target_yaw_rate_ref_ = 0.0f;
@@ -413,22 +413,19 @@ class Gimbal {
     }
     topic_auto_aim_yaw_.Publish(auto_aim_yaw_);
 
-    const auto motor_control = [this](Motor *motor,
-                                      const Motor::Feedback &feedback,
-                                      const Motor::MotorCmd &command) {
-      bool applied = false;
+    const auto motor_control = [this](Motor* motor,
+                                      const Motor::Feedback& feedback,
+                                      const Motor::MotorCmd& command) {
       if (feedback.state == 0) {
         motor->Enable();
       } else if (feedback.state != 1) {
         motor->ClearError();
       } else {
         motor->Control(command);
-        applied = true;
       }
       if (motor == motor_yaw_) {
         big_yaw_relaxed_ = false;
       }
-      return applied;
     };
 
     switch (current_mode_) {
@@ -467,7 +464,7 @@ class Gimbal {
                       big_yaw_gyro_.z() * std::cos(big_yaw_euler_.Roll())) /
                          std::cos(big_yaw_euler_.Pitch())
                    : motor_yaw_feedback_.omega;
-        const auto big_yaw_output = control.yaw_smc.Calculate(
+        const float big_yaw_output = control.yaw_smc.Calculate(
             {.theta_rad = patrol ? target_big_world_yaw_
                           : hold ? auto_aim_yaw_.hold_encoder_angle_rad
                                  : big_yaw_angle + syaw_follow_error,
@@ -480,29 +477,19 @@ class Gimbal {
                                               : motor_syaw_feedback_.omega),
              .alpha_rad_s2 = 0.0f},
             {.theta_rad = patrol ? big_yaw_euler_.Yaw() : big_yaw_angle,
-             .omega_rad_s = big_yaw_rate,
-             .valid = motor_yaw_feedback_.state == 1},
-            dt_, PARAM.j_yaw);
+             .omega_rad_s = big_yaw_rate},
+            PARAM.j_yaw);
 
-        const bool yaw_applied =
-            motor_control(motor_yaw_, motor_yaw_feedback_,
-                          {.mode = Motor::ControlMode::MODE_TORQUE,
-                           .torque = big_yaw_output.tau_cmd_nm});
-        const bool syaw_applied = motor_control(
-            motor_syaw_, motor_syaw_feedback_,
-            {.mode = Motor::ControlMode::MODE_TORQUE, .torque = yaw_output});
+        motor_control(motor_yaw_, motor_yaw_feedback_,
+                      {.mode = Motor::ControlMode::MODE_TORQUE,
+                       .torque = big_yaw_output});
+        motor_control(motor_syaw_, motor_syaw_feedback_,
+                      {.mode = Motor::ControlMode::MODE_TORQUE,
+                       .torque = yaw_output});
         motor_control(
             motor_pit_, motor_pit_feedback_,
             {.mode = Motor::ControlMode::MODE_TORQUE,
              .torque = std::isfinite(pit_output) ? pit_output : 0.0f});
-        if (yaw_applied) {
-          last_applied_yaw_torque_nm_ = big_yaw_output.tau_cmd_nm;
-          control.yaw_smc.CommitAppliedTorque(big_yaw_output.tau_cmd_nm);
-        }
-        if (syaw_applied) {
-          last_applied_syaw_torque_nm_ = yaw_output;
-          control.syaw_smc.CommitAppliedTorque(yaw_output);
-        }
         return;
       }
     }
@@ -514,10 +501,8 @@ class Gimbal {
 
     motor_pit_->Relax();
     motor_syaw_->Relax();
-    manual_control_.Reset(0.0f, 0.0f);
-    auto_aim_control_.Reset(0.0f, 0.0f);
-    last_applied_yaw_torque_nm_ = 0.0f;
-    last_applied_syaw_torque_nm_ = 0.0f;
+    manual_control_.Reset();
+    auto_aim_control_.Reset();
   }
 
   LibXR::Event &GetEvent() { return gimbal_event_; }
@@ -531,19 +516,16 @@ class Gimbal {
     float last_pitch_speed = 0.0f;
     bool pitch_reference_primed = false;
 
-    ControlState(const ControlParam &param,
-                 const YawSmc::OutputLimits &output_limits)
+    ControlState(const ControlParam& param, float yaw_torque_limit_nm)
         : pid_pit_angle(param.pid_pit_angle),
           pid_pit_omega(param.pid_pit_omega),
-          yaw_smc(param.yaw_smc, output_limits),
-          syaw_smc(param.syaw_smc, output_limits) {}
+          yaw_smc(param.yaw_smc, yaw_torque_limit_nm),
+          syaw_smc(param.syaw_smc, yaw_torque_limit_nm) {}
 
-    void Reset(float applied_yaw_torque, float applied_syaw_torque) {
+    void Reset() {
       pid_pit_angle.Reset();
       pid_pit_omega.Reset();
       pid_pit_omega.SetFeedForward(0.0f);
-      yaw_smc.Reset(applied_yaw_torque);
-      syaw_smc.Reset(applied_syaw_torque);
       last_pitch_speed = 0.0f;
       pitch_reference_primed = false;
     }
@@ -576,8 +558,6 @@ class Gimbal {
   Motor::Feedback motor_pit_feedback_{};
 
   bool big_yaw_relaxed_ = false;
-  float last_applied_yaw_torque_nm_ = 0.0f;
-  float last_applied_syaw_torque_nm_ = 0.0f;
 
   bool ai_gimbal_reference_active_ = false;
   AutoAimYawStatus auto_aim_yaw_;
@@ -666,7 +646,7 @@ class Gimbal {
     pit_output = control.pid_pit_omega.Calculate(pitch_speed_ref,
                                                  measured_pitch_rate, dt);
 
-    const auto small_yaw_output = control.syaw_smc.Calculate(
+    yaw_output = control.syaw_smc.Calculate(
         {.theta_rad = target_yaw_angle,
          .omega_rad_s = target_yaw_rate_ref_,
          .alpha_rad_s2 = target_yaw_accel_ref_},
@@ -678,13 +658,11 @@ class Gimbal {
                             ? (-gyro_data_.y() * std::sin(euler_.Roll()) +
                                gyro_data_.z() * std::cos(euler_.Roll())) /
                                   std::cos(euler_.Pitch())
-                            : gyro_data_.z(),
-         .valid = motor_syaw_feedback_.state == 1},
-        dt, PARAM.j_syaw);
+                            : gyro_data_.z()},
+        PARAM.j_syaw);
 
     control.last_pitch_speed = pitch_speed_ref;
     control.pitch_reference_primed = true;
-    yaw_output = small_yaw_output.tau_cmd_nm;
   }
 
   void ControlIdentify(const auto &motor_control) {
@@ -786,10 +764,8 @@ class Gimbal {
         }
         motor_pit_->Disable();
         motor_syaw_->Disable();
-        last_applied_yaw_torque_nm_ = 0.0f;
-        last_applied_syaw_torque_nm_ = 0.0f;
-        manual_control_.Reset(0.0f, 0.0f);
-        auto_aim_control_.Reset(0.0f, 0.0f);
+        manual_control_.Reset();
+        auto_aim_control_.Reset();
         target_world_pitch_ = 0.0f;
         target_world_yaw_ = 0.0f;
         target_yaw_rate_ref_ = 0.0f;
@@ -801,10 +777,8 @@ class Gimbal {
       default:
         target_world_pitch_ = euler_.Pitch();
         target_world_yaw_ = euler_.Yaw();
-        manual_control_.Reset(last_applied_yaw_torque_nm_,
-                              last_applied_syaw_torque_nm_);
-        auto_aim_control_.Reset(last_applied_yaw_torque_nm_,
-                                last_applied_syaw_torque_nm_);
+        manual_control_.Reset();
+        auto_aim_control_.Reset();
         target_yaw_rate_ref_ = 0.0f;
         target_yaw_accel_ref_ = 0.0f;
         target_initialized_ = false;
@@ -814,10 +788,8 @@ class Gimbal {
         ai_gimbal_reference_active_ = false;
         target_world_pitch_ = 0.0f;
         target_world_yaw_ = euler_.Yaw();
-        manual_control_.Reset(last_applied_yaw_torque_nm_,
-                              last_applied_syaw_torque_nm_);
-        auto_aim_control_.Reset(last_applied_yaw_torque_nm_,
-                                last_applied_syaw_torque_nm_);
+        manual_control_.Reset();
+        auto_aim_control_.Reset();
         target_yaw_rate_ref_ = 0.0f;
         target_yaw_accel_ref_ = 0.0f;
         target_initialized_ = false;
@@ -825,10 +797,8 @@ class Gimbal {
       case GimbalEvent::SET_MODE_IDENTIFY:
         target_world_pitch_ = euler_.Pitch();
         target_world_yaw_ = euler_.Yaw();
-        manual_control_.Reset(last_applied_yaw_torque_nm_,
-                              last_applied_syaw_torque_nm_);
-        auto_aim_control_.Reset(last_applied_yaw_torque_nm_,
-                                last_applied_syaw_torque_nm_);
+        manual_control_.Reset();
+        auto_aim_control_.Reset();
         target_yaw_rate_ref_ = 0.0f;
         target_yaw_accel_ref_ = 0.0f;
         target_initialized_ = false;
@@ -837,10 +807,8 @@ class Gimbal {
       case GimbalEvent::SET_VISION_AUTO_AIM:
         target_world_pitch_ = euler_.Pitch();
         target_world_yaw_ = euler_.Yaw();
-        manual_control_.Reset(last_applied_yaw_torque_nm_,
-                              last_applied_syaw_torque_nm_);
-        auto_aim_control_.Reset(last_applied_yaw_torque_nm_,
-                                last_applied_syaw_torque_nm_);
+        manual_control_.Reset();
+        auto_aim_control_.Reset();
         target_yaw_rate_ref_ = 0.0f;
         target_yaw_accel_ref_ = 0.0f;
         target_initialized_ = false;
@@ -849,10 +817,8 @@ class Gimbal {
       case GimbalEvent::SET_VISION_SMALL_BUFF:
         target_world_pitch_ = euler_.Pitch();
         target_world_yaw_ = euler_.Yaw();
-        manual_control_.Reset(last_applied_yaw_torque_nm_,
-                              last_applied_syaw_torque_nm_);
-        auto_aim_control_.Reset(last_applied_yaw_torque_nm_,
-                                last_applied_syaw_torque_nm_);
+        manual_control_.Reset();
+        auto_aim_control_.Reset();
         target_yaw_rate_ref_ = 0.0f;
         target_yaw_accel_ref_ = 0.0f;
         target_initialized_ = false;
@@ -861,10 +827,8 @@ class Gimbal {
       case GimbalEvent::SET_VISION_BIG_BUFF:
         target_world_pitch_ = euler_.Pitch();
         target_world_yaw_ = euler_.Yaw();
-        manual_control_.Reset(last_applied_yaw_torque_nm_,
-                              last_applied_syaw_torque_nm_);
-        auto_aim_control_.Reset(last_applied_yaw_torque_nm_,
-                                last_applied_syaw_torque_nm_);
+        manual_control_.Reset();
+        auto_aim_control_.Reset();
         target_yaw_rate_ref_ = 0.0f;
         target_yaw_accel_ref_ = 0.0f;
         target_initialized_ = false;

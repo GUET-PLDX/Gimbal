@@ -28,7 +28,9 @@ yaw_smc: {c: 20.0, k: 120.0, epsilon: 0.5, q: 21.0, p: 27.0, error_deadband_rad:
 syaw_smc: {c: 20.0, k: 120.0, epsilon: 0.5, q: 21.0, p: 27.0, error_deadband_rad: 0.0, ftsmc_switch_rad: 0.0174532925, sat_boundary: 1.0, ftsmc_enable: true}
 ```
 
-`manual` 和 `auto_aim` 各自包含 Pitch 双环 PID、`yaw_smc` 和 `syaw_smc`；两路 SMC 共用 `yaw_output_limits`，但分别使用 `j_yaw` 与 `j_syaw`。迁移固件 YAML 时，需加入两个 SMC 参数块、`yaw_output_limits`、`two_axis_ik` 和 `yaw_follow`，并确认 `motor_yaw`、`motor_syaw`、`motor_pit` 三个实例被绑定。仓库测试夹具只守护模块接口，不会自动修改使用该模块的固件配置。
+`manual` 和 `auto_aim` 各自包含 Pitch 双环 PID、`yaw_smc` 和 `syaw_smc`。两路 SMC 共用对称幅值上限 `yaw_torque_limit_nm`（N·m），并分别使用 `j_yaw` 与 `j_syaw`。迁移固件 YAML 时用此标量替换 `yaw_output_limits` 映射。
+
+两路 SMC 按 QDU TSMC 解算。起步或反向时可在当拍达到幅值上限。周期延迟超过 20 ms 时仍解算力矩。非有限输入可能产生非有限力矩，由电机接口接收。
 
 ## 检查
 
