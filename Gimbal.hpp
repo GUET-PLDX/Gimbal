@@ -15,7 +15,6 @@ depends:
 #include <optional>
 
 #include "CMD.hpp"
-#include "Lifter.hpp"
 #include "Motor.hpp"
 #include "SystemIdentify.hpp"
 #include "YawSmc.hpp"
