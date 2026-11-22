@@ -1,43 +1,47 @@
 # Gimbal
 
-该模块用 PDF《二轴云台末端指向控制》的向量反解生成小 Yaw/Pitch 关节目标。两个 Yaw 轴均使用 `YawSmc`：大 Yaw 跟踪世界角参考，小 Yaw 跟踪 IK 关节角；Pitch 使用 LibXR 双环 PID。
+小 Yaw 和 Pitch 直接跟踪世界姿态目标，使用云台 IMU 姿态和角速度闭环。两个 Yaw 轴保留各自的 `YawSmc`，Pitch 使用 LibXR 双环 PID。
 
 ## 控制链
 
-`TwoAxisIK::Solve()` 仅使用目标的世界 Yaw/Pitch 构造视轴，目标 Roll 不参与指向；基座姿态通过 ZYX 旋转矩阵补偿。默认 `imu_at_end: true`，用末端 IMU 姿态和两轴编码器角反求基座姿态；IMU 若安装在固定基座上，应设为 `false`。Pitch 目标按配置限位裁剪，Yaw 在允许的角度分支中选择离当前角最近的一支，天顶/天底处保留当前 Yaw。
-
-IK 的零点和方向配置采用物理关节坐标：`joint = sign * (encoder - zero)`。`yaw_sign` 和 `pitch_sign` 只接受 `+1` 或 `-1`；小 Yaw SMC 使用物理关节角和编码器角速度，输出力矩再映射回电机方向。大 Yaw SMC 使用 IMU 世界 Yaw/角速度；启用 `yaw_follow` 时，小 Yaw 偏差只改变大 Yaw SMC 的参考角，不经过 PID。`j_yaw`、`j_syaw` 和 `j_pit` 需按机构重新辨识和整定。
+`gimbal_euler` 提供姿态反馈，`gimbal_gyro` 的 Z/Y 分量分别提供小 Yaw/Pitch 角速度反馈。关节角采用 `joint = encoder - zero`，用于发布相对角度、Pitch 限位和大 Yaw 跟随。小 Yaw 不做软件角度限位。`syaw_zero`、`pit_zero` 和 `yaw_zero` 分别是小 Yaw、Pitch 和大 Yaw 的编码器零点。
 
 ## 电机角色
 
-- `motor_syaw`：PDF 所定义的小 Yaw 关节，参与 IK，并由独立 SMC 跟踪 IK 角度。
-- `motor_pit`：Pitch 关节，参与 IK 和 Pitch 双环 PID。
-- `motor_yaw`：大 Yaw 执行器，由独立 SMC 跟踪世界 Yaw；`yaw_follow.enabled` 时参考角叠加实测小 Yaw 偏差，同样由 SMC 执行跟随。
-- `motor_fold`：目前只更新反馈。
+- `motor_syaw`：由独立 SMC 跟踪世界 Yaw 目标。
+- `motor_pit`：由双环 PID 跟踪世界 Pitch 目标。
+- `motor_yaw`：大 Yaw 执行器，正常闭环中由独立 SMC 使用编码器反馈跟随小 Yaw 偏差，死区由 `yaw_follow_deadband_rad` 配置。
+- `motor_fold` 通过编码器角度和电机角速度闭环。主控使用单独配置的滑模参数解算力矩。导航 `TOP` 对应展开位 `π/2 rad`，`BOTTOM` 对应折叠位 `0 rad`。
 
-手动摇杆输入继续按控制周期积分成世界姿态目标；AI 命令的 Yaw/Pitch 作为绝对角输入。输入姿态或陀螺仪超时、关节电机离线、周期异常或解算结果无效时，控制输出进入 RELAX。Pitch 限位以 `two_axis_ik.pitch_min_rad` 和 `pitch_max_rad` 为准。系统辨识的 `YAW_ONLY` 现在激励小 Yaw 电机，辨识前须再次确认机构行程、速度上限和参数，不应直接用旧配置上电辨识。
+折叠轴从当前编码器角平滑移向请求端点，到位后继续闭环保持。`lifter_current_pos` 由编码器角和端点容差判定，`transform_state` 从展开位的 `0` 增至折叠位的 `100`。折叠轴的初始参考速度 `2 rad/s` 和到位容差 `0.1 rad` 取自 `foldable_gimbal`。惯量 `0.001 kg·m²`、力矩上限 `1 N·m` 及滑模增益为台架试调初值。联调前，在达妙上位机将折叠电机的 `PMAX` 设为 `2π rad`（约 `6.283185 rad`）并保存，与固件 `DM4310_PMAX` 的反馈解码量程一致。
+
+手动摇杆输入继续按控制周期积分成世界姿态目标。AI 命令的 Yaw/Pitch 作为绝对角输入。两路 `YawSmc` 按 QDU TSMC 解算当前周期的力矩并做单级对称限幅。系统辨识使用编码器角速度，`YAW_ONLY` 对应小 Yaw。辨识前须确认机构行程、速度上限和参数。
+
+大、小 Yaw 从零力矩起步或反向时可在当拍达到幅值上限。周期延迟超过 20 ms 时仍按当前参考和反馈解算。非有限输入可能产生非有限力矩，由电机接口接收。
+
+`ThreadFunc()` 每周期依次调用 `Update()`、`ParseCMD()` 和 `Control()`。`Update()` 刷新并发布反馈，`ParseCMD()` 更新控制目标。常规模式下，`Control()` 限制 Pitch 目标并解算力矩，再按各电机的反馈状态选择使能、清错或下发力矩。Pitch 解算得到非有限力矩时，仅该轴使用零力矩。`SetMode()` 集中处理模式进入动作。
 
 ## 参数契约
 
-XRobot 按 `Gimbal::Param`、`ControlParam`、`YawFollowParam` 和 `TwoAxisIK::Config` 的声明顺序展开映射。配置结构和默认值回归见 `tests/gimbal_config_order_regression.py` 与 `tests/gimbal_config_fixture.yaml`。一个 `ControlParam` 的字段顺序为：
+XRobot 按 `Gimbal::Param` 和 `ControlParam` 的声明顺序展开映射。产品配置和非对称回中门限的生成回归位于整车工程的 `tools/tests/gimbal_autoaim/test_config.py`。一个 `ControlParam` 的字段顺序为：
 
 ```yaml
 pid_pit_angle: {k: 1.0, p: 2.0, i: 0.0, d: 0.0, i_limit: 0.0, out_limit: 8.0, cycle: false}
 pid_pit_omega: {k: 1.0, p: 0.4, i: 0.0, d: 0.0, i_limit: 0.0, out_limit: 2.0, cycle: false}
 yaw_smc: {c: 20.0, k: 120.0, epsilon: 0.5, q: 21.0, p: 27.0, error_deadband_rad: 0.0, ftsmc_switch_rad: 0.0174532925, sat_boundary: 1.0, ftsmc_enable: true}
 syaw_smc: {c: 20.0, k: 120.0, epsilon: 0.5, q: 21.0, p: 27.0, error_deadband_rad: 0.0, ftsmc_switch_rad: 0.0174532925, sat_boundary: 1.0, ftsmc_enable: true}
+fold_smc: {c: 20.0, k: 120.0, epsilon: 0.5, q: 21.0, p: 27.0, error_deadband_rad: 0.0, ftsmc_switch_rad: 0.0174532925, sat_boundary: 1.0, ftsmc_enable: true}
 ```
 
-`manual` 和 `auto_aim` 各自包含 Pitch 双环 PID、`yaw_smc` 和 `syaw_smc`。两路 SMC 共用对称幅值上限 `yaw_torque_limit_nm`（N·m），并分别使用 `j_yaw` 与 `j_syaw`。迁移固件 YAML 时用此标量替换 `yaw_output_limits` 映射。
+`manual` 和 `auto_aim` 各自包含 Pitch 双环 PID、`yaw_smc` 和 `syaw_smc`。大、小 Yaw 的对称力矩幅值上限分别为 `yaw_torque_limit_nm` 和 `syaw_torque_limit_nm`（N·m），转动惯量分别为 `j_yaw` 和 `j_syaw`。省略 `syaw_torque_limit_nm` 时，两轴沿用 `yaw_torque_limit_nm`。
 
-两路 SMC 按 QDU TSMC 解算。起步或反向时可在当拍达到幅值上限。周期延迟超过 20 ms 时仍解算力矩。非有限输入可能产生非有限力矩，由电机接口接收。
+折叠轴在各模式统一读取 `manual.fold_smc`。XRobot 要求 `auto_aim.fold_smc` 也出现在配置中，该字段填 `YawSmc::Param{}`。`Param` 直接配置折叠轴端点 `fold_bottom_rad`、`fold_top_rad`，到位容差 `fold_tolerance_rad`，参考速度 `fold_ramp_rad_s`，惯量 `j_fold` 和力矩上限 `fold_torque_limit_nm`。
+
+小 Yaw 机械边界 `small_yaw_min_rad`、`small_yaw_max_rad` 与普通自瞄回中门限 `auto_aim_recenter_trigger_min_rad`、`auto_aim_recenter_trigger_max_rad` 都是 `Param` 的直接成员，均为相对 `syaw_zero` 的角度。回中完成复用 `yaw_follow_deadband_rad`。
 
 ## 检查
 
 ```sh
 bash tests/yaw_smc_host_regression.sh
-bash tests/two_axis_ik_host_regression.sh
 bash tests/system_identify_host_regression.sh
 ```
-
-IK host 用例覆盖单位姿态、底座 Roll 耦合、末端 IMU 反解、零点/方向、限位、Yaw 角度分支和天顶奇异点。

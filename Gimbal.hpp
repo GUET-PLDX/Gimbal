@@ -15,6 +15,7 @@ depends:
 #include <optional>
 
 #include "CMD.hpp"
+#include "Lifter.hpp"
 #include "Motor.hpp"
 #include "SystemIdentify.hpp"
 #include "YawSmc.hpp"
@@ -61,6 +62,7 @@ class Gimbal {
     LibXR::PID<float>::Param pid_pit_omega;
     YawSmc::Param yaw_smc;
     YawSmc::Param syaw_smc;
+    YawSmc::Param fold_smc;
   };
 
   struct PatrolParam {
@@ -69,8 +71,8 @@ class Gimbal {
     float small_yaw_period_s;
     float pitch_amplitude_rad;
     float pitch_period_s;
-    const char *big_yaw_euler_topic_name;
-    const char *big_yaw_gyro_topic_name;
+    const char* big_yaw_euler_topic_name;
+    const char* big_yaw_gyro_topic_name;
   };
 
   struct Param {
@@ -78,57 +80,68 @@ class Gimbal {
     ControlParam manual;
     ControlParam auto_aim;
     float yaw_torque_limit_nm;
+    std::optional<float> syaw_torque_limit_nm;
+    float fold_torque_limit_nm;
+    float yaw_zero;
     float syaw_zero;
     float pit_zero;
     float pitch_min_rad;
     float pitch_max_rad;
+    float small_yaw_min_rad;
+    float small_yaw_max_rad;
+    float fold_bottom_rad;
+    float fold_top_rad;
+    float fold_tolerance_rad;
     float yaw_follow_deadband_rad;
+    float auto_aim_recenter_trigger_min_rad;
+    float auto_aim_recenter_trigger_max_rad;
+    float fold_ramp_rad_s;
     float pit_lc;
     float pit_theta;
     float j_pit;
     float j_yaw;
     float j_syaw;
-    float yaw_zero;
-    // Retained for existing XRobot positional aggregates; patrol uses
-    // PatrolParam.
+    float j_fold;
     float patrol_pitch_amplitude_rad;
     float patrol_pitch_angular_rate_rad_s;
     float patrol_yaw_rate_rad_s;
     LibXR::Thread::Priority thread_priority;
     SystemIdentify::Config system_identify;
-    const char *euler_topic_name;
-    const char *gyro_topic_name;
-    const char *gimbal_cmd_topic_name;
+    const char* euler_topic_name;
+    const char* gyro_topic_name;
+    const char* gimbal_cmd_topic_name;
     PatrolParam patrol;
-    struct AutoAimRecenterParam {
-      // Relative to syaw_zero, rad. Allowed travel is calibration metadata;
-      // only the trigger thresholds change control, without a new small Yaw
-      // clamp.
-      float small_yaw_min_rad;
-      float small_yaw_max_rad;
-      float trigger_min_rad;
-      float trigger_max_rad;
-    } auto_aim_recenter;
   };
 
-  Gimbal(CMD &cmd, Motor &motor_pit, Motor &motor_yaw, Motor &motor_syaw,
-         Motor &motor_fold,
-         const Param &param =
+  Gimbal(CMD& cmd, Motor& motor_pit, Motor& motor_yaw, Motor& motor_syaw,
+         Motor& motor_fold,
+         const Param& param =
              Param{.task_stack_depth = 2048,
                    .manual = {},
                    .auto_aim = {},
                    .yaw_torque_limit_nm = 2.0f,
+                   .syaw_torque_limit_nm = {},
+                   .fold_torque_limit_nm = 0.0f,
+                   .yaw_zero = 0.0f,
                    .syaw_zero = 0.0f,
                    .pit_zero = 0.0f,
                    .pitch_min_rad = -static_cast<float>(LibXR::PI / 2.0),
                    .pitch_max_rad = static_cast<float>(LibXR::PI / 2.0),
+                   .small_yaw_min_rad = 0.0f,
+                   .small_yaw_max_rad = 0.0f,
+                   .fold_bottom_rad = 0.0f,
+                   .fold_top_rad = 0.0f,
+                   .fold_tolerance_rad = 0.0f,
                    .yaw_follow_deadband_rad = 0.0f,
+                   .auto_aim_recenter_trigger_min_rad = 0.0f,
+                   .auto_aim_recenter_trigger_max_rad = 0.0f,
+                   .fold_ramp_rad_s = 0.0f,
                    .pit_lc = 0.0f,
                    .pit_theta = 0.0f,
                    .j_pit = 0.0f,
                    .j_yaw = 0.0f,
                    .j_syaw = 0.0f,
-                   .yaw_zero = 0.0f,
+                   .j_fold = 0.0f,
                    .patrol_pitch_amplitude_rad = 0.0f,
                    .patrol_pitch_angular_rate_rad_s = 0.0f,
                    .patrol_yaw_rate_rad_s = 0.0f,
@@ -137,30 +150,28 @@ class Gimbal {
                    .euler_topic_name = "gimbal_euler",
                    .gyro_topic_name = "gimbal_gyro",
                    .gimbal_cmd_topic_name = "gimbal_cmd",
-                   .patrol = {},
-                   .auto_aim_recenter = {}})
+                   .patrol = {}})
       : cmd_(cmd),
         PARAM(param),
-        manual_control_(PARAM.manual, PARAM.yaw_torque_limit_nm),
-        auto_aim_control_(PARAM.auto_aim, PARAM.yaw_torque_limit_nm),
+        manual_control_(PARAM.manual, PARAM),
+        auto_aim_control_(PARAM.auto_aim, PARAM),
+        fold_smc_(PARAM.manual.fold_smc, PARAM.fold_torque_limit_nm, false),
         motor_yaw_(&motor_yaw),
         motor_pit_(&motor_pit),
         motor_syaw_(&motor_syaw),
         motor_fold_(&motor_fold),
         system_identify_(param.system_identify) {
-    ASSERT(PARAM.auto_aim_recenter.small_yaw_min_rad <=
-               PARAM.auto_aim_recenter.trigger_min_rad &&
-           PARAM.auto_aim_recenter.trigger_min_rad <= 0.0f &&
-           PARAM.auto_aim_recenter.trigger_max_rad >= 0.0f &&
-           PARAM.auto_aim_recenter.trigger_max_rad <=
-               PARAM.auto_aim_recenter.small_yaw_max_rad);
+    ASSERT(PARAM.small_yaw_min_rad <= PARAM.auto_aim_recenter_trigger_min_rad &&
+           PARAM.auto_aim_recenter_trigger_min_rad <= 0.0f &&
+           PARAM.auto_aim_recenter_trigger_max_rad >= 0.0f &&
+           PARAM.auto_aim_recenter_trigger_max_rad <= PARAM.small_yaw_max_rad);
     auto lost_ctrl_callback = LibXR::Callback<uint32_t>::Create(
-        [](bool, Gimbal *gimbal, uint32_t) {
+        [](bool, Gimbal* gimbal, uint32_t) {
           gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
         },
         this);
     auto callback = LibXR::Callback<uint32_t>::Create(
-        [](bool in_isr, Gimbal *gimbal, uint32_t event_id) {
+        [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           ASSERT(!in_isr);
           if (in_isr) return;
           gimbal->SetMode(static_cast<GimbalEvent>(event_id));
@@ -176,13 +187,16 @@ class Gimbal {
                    PARAM.thread_priority);
   }
 
-  static void ThreadFunc(Gimbal *gimbal) {
+  static void ThreadFunc(Gimbal* gimbal) {
     LibXR::Topic::ASyncSubscriber<CMD::GimbalCMD> cmd_suber(
         gimbal->PARAM.gimbal_cmd_topic_name);
     LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>> euler_suber(
         gimbal->PARAM.euler_topic_name);
     LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>> gyro_suber(
         gimbal->PARAM.gyro_topic_name);
+    LibXR::Topic::ASyncSubscriber<Pldx::LifterPosition> fold_target_suber(
+        LibXR::Topic(LibXR::Topic::FindOrCreate<Pldx::LifterPosition>(
+            Pldx::LIFTER_TARGET_TOPIC)));
     std::optional<LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>>>
         big_yaw_euler_suber;
     std::optional<LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>>>
@@ -199,6 +213,7 @@ class Gimbal {
     cmd_suber.StartWaiting();
     euler_suber.StartWaiting();
     gyro_suber.StartWaiting();
+    fold_target_suber.StartWaiting();
 
     gimbal->last_online_time_ = LibXR::Timebase::GetMicroseconds();
 
@@ -222,6 +237,10 @@ class Gimbal {
         gimbal->gyro_data_.y() *= -1.0f;
         gimbal->gyro_received_ = true;
         gyro_suber.StartWaiting();
+      }
+      if (fold_target_suber.Available()) {
+        gimbal->fold_target_ = fold_target_suber.GetData();
+        fold_target_suber.StartWaiting();
       }
       if (big_yaw_euler_suber && big_yaw_euler_suber->Available()) {
         gimbal->big_yaw_euler_ = big_yaw_euler_suber->GetData();
@@ -256,10 +275,11 @@ class Gimbal {
     motor_yaw_->Update();
     motor_pit_->Update();
     motor_syaw_->Update();
-    motor_fold_->Update();
+    fold_motor_online_ = motor_fold_->Update() == LibXR::ErrorCode::OK;
     motor_yaw_feedback_ = motor_yaw_->GetFeedback();
     motor_pit_feedback_ = motor_pit_->GetFeedback();
     motor_syaw_feedback_ = motor_syaw_->GetFeedback();
+    fold_motor_feedback_ = motor_fold_->GetFeedback();
 
     auto now = LibXR::Timebase::GetMicroseconds();
     this->dt_ = (now - this->last_online_time_).ToSecondf();
@@ -270,6 +290,27 @@ class Gimbal {
     small_yaw_relative_angle_ =
         motor_syaw_feedback_.abs_angle - PARAM.syaw_zero;
 
+    Pldx::LifterFeedback lifter_feedback;
+    if (PARAM.fold_top_rad > PARAM.fold_bottom_rad && fold_motor_online_ &&
+        fold_motor_feedback_.received_time_us != 0U) {
+      const float angle = fold_motor_feedback_.position;
+      if (std::fabs(angle - PARAM.fold_top_rad) <= PARAM.fold_tolerance_rad) {
+        lifter_feedback.position = Pldx::LifterPosition::TOP;
+      } else if (std::fabs(angle - PARAM.fold_bottom_rad) <=
+                 PARAM.fold_tolerance_rad) {
+        lifter_feedback.position = Pldx::LifterPosition::BOTTOM;
+        lifter_feedback.transform_percent = 100.0f;
+      } else {
+        lifter_feedback.transform_percent = 100.0f * std::clamp(
+            1.0f - std::fabs(angle - PARAM.fold_bottom_rad) /
+                       (PARAM.fold_top_rad - PARAM.fold_bottom_rad),
+            0.0f, 1.0f);
+      }
+      lifter_feedback.is_transformable =
+          fold_motor_feedback_.error_id == 0U &&
+          lifter_feedback.position != Pldx::LifterPosition::MIDDLE;
+    }
+    fold_feedback_topic_.Publish(lifter_feedback);
     topic_yaw_angle_.Publish(big_yaw);
     topic_pit_angle_.Publish(pitch_relative_angle_);
     topic_syaw_angle_.Publish(small_yaw_relative_angle_);
@@ -398,10 +439,8 @@ class Gimbal {
         auto_aim_yaw_.hold_encoder_angle_rad = big_yaw_angle;
       }
       if (auto_aim_yaw_.state == AutoAimYawState::HOLD &&
-          (small_yaw_relative_angle_ <
-               PARAM.auto_aim_recenter.trigger_min_rad ||
-           small_yaw_relative_angle_ >
-               PARAM.auto_aim_recenter.trigger_max_rad)) {
+          (small_yaw_relative_angle_ < PARAM.auto_aim_recenter_trigger_min_rad ||
+           small_yaw_relative_angle_ > PARAM.auto_aim_recenter_trigger_max_rad)) {
         auto_aim_yaw_.state = AutoAimYawState::RECENTER;
       } else if (auto_aim_yaw_.state == AutoAimYawState::RECENTER &&
                  std::fabs(small_yaw_relative_angle_) <=
@@ -428,6 +467,41 @@ class Gimbal {
       }
     };
 
+    const bool fold_requested = fold_target_.has_value() &&
+                                PARAM.fold_torque_limit_nm > 0.0f;
+    if (fold_requested && current_mode_ != GimbalEvent::SET_MODE_RELAX &&
+        current_mode_ != GimbalEvent::SET_MODE_IDENTIFY) {
+      if (!fold_motor_online_) {
+        fold_reference_rad_.reset();
+      } else if (fold_motor_feedback_.state != 1U) {
+        fold_reference_rad_.reset();
+        motor_control(motor_fold_, fold_motor_feedback_, {});
+        fold_engaged_ = true;
+      } else if (fold_motor_feedback_.received_time_us != 0U) {
+        const float target = *fold_target_ == Pldx::LifterPosition::TOP
+                                 ? PARAM.fold_top_rad
+                                 : PARAM.fold_bottom_rad;
+        const float angle = fold_motor_feedback_.position;
+        const float reference = fold_reference_rad_.value_or(angle);
+        const float max_step = PARAM.fold_ramp_rad_s * dt_;
+        const float step = std::clamp(target - reference, -max_step, max_step);
+        fold_reference_rad_ = reference + step;
+        const float torque = fold_smc_.Calculate(
+            {.theta_rad = *fold_reference_rad_,
+             .omega_rad_s = dt_ > 0.0f ? step / dt_ : 0.0f},
+            {.theta_rad = angle, .omega_rad_s = fold_motor_feedback_.omega},
+            PARAM.j_fold);
+        motor_control(motor_fold_, fold_motor_feedback_,
+                      {.mode = Motor::ControlMode::MODE_TORQUE,
+                       .torque = torque});
+        fold_engaged_ = true;
+      }
+    } else if (fold_engaged_) {
+      motor_fold_->Relax();
+      fold_reference_rad_.reset();
+      fold_engaged_ = false;
+    }
+
     switch (current_mode_) {
       case GimbalEvent::SET_MODE_RELAX:
         break;
@@ -449,7 +523,7 @@ class Gimbal {
         float yaw_output = 0.0f;
         Solve(pit_output, yaw_output, target_pit_angle, target_world_yaw_, dt_);
 
-        auto &control =
+        auto& control =
             ai_gimbal_reference_active_ ? auto_aim_control_ : manual_control_;
         const float syaw_follow_error =
             std::fabs(small_yaw_relative_angle_) <=
@@ -505,7 +579,7 @@ class Gimbal {
     auto_aim_control_.Reset();
   }
 
-  LibXR::Event &GetEvent() { return gimbal_event_; }
+  LibXR::Event& GetEvent() { return gimbal_event_; }
 
  private:
   struct ControlState {
@@ -516,11 +590,12 @@ class Gimbal {
     float last_pitch_speed = 0.0f;
     bool pitch_reference_primed = false;
 
-    ControlState(const ControlParam& param, float yaw_torque_limit_nm)
+    ControlState(const ControlParam& param, const Param& limits)
         : pid_pit_angle(param.pid_pit_angle),
           pid_pit_omega(param.pid_pit_omega),
-          yaw_smc(param.yaw_smc, yaw_torque_limit_nm),
-          syaw_smc(param.syaw_smc, yaw_torque_limit_nm) {}
+          yaw_smc(param.yaw_smc, limits.yaw_torque_limit_nm),
+          syaw_smc(param.syaw_smc, limits.syaw_torque_limit_nm.value_or(
+                                      limits.yaw_torque_limit_nm)) {}
 
     void Reset() {
       pid_pit_angle.Reset();
@@ -575,6 +650,15 @@ class Gimbal {
   const Param PARAM;
   ControlState manual_control_;
   ControlState auto_aim_control_;
+  YawSmc fold_smc_;
+  Motor::Feedback fold_motor_feedback_{};
+  bool fold_motor_online_ = false;
+  std::optional<Pldx::LifterPosition> fold_target_;
+  std::optional<float> fold_reference_rad_;
+  bool fold_engaged_ = false;
+  LibXR::Topic fold_feedback_topic_{
+      LibXR::Topic::FindOrCreate<Pldx::LifterFeedback>(
+          Pldx::LIFTER_FEEDBACK_TOPIC)};
 
   Motor* motor_yaw_;
   Motor* motor_pit_;
@@ -603,11 +687,11 @@ class Gimbal {
   LibXR::Topic topic_vision_task_ =
       LibXR::Topic::CreateTopic<uint8_t>("vision_task");
   LibXR::Topic topic_auto_aim_yaw_ =
-      LibXR::Topic::CreateTopic<AutoAimYawStatus>("gimbal_auto_aim_yaw", nullptr,
-                                                true);
+      LibXR::Topic::CreateTopic<AutoAimYawStatus>("gimbal_auto_aim_yaw",
+                                                  nullptr, true);
   LibXR::Thread thread_;
 
-  void PitchLimit(float &target_pit, float now_eulr_angle,
+  void PitchLimit(float& target_pit, float now_eulr_angle,
                   float now_motor_angle, float motor_max, float motor_min,
                   float sign) {
     if (motor_max == 0.0f && motor_min == 0.0f) {
@@ -623,9 +707,9 @@ class Gimbal {
                             std::max(pitch_bound_0, pitch_bound_1));
   }
 
-  void Solve(float &pit_output, float &yaw_output, float target_pit_angle,
-             const LibXR::CycleValue<float> &target_yaw_angle, float dt) {
-    auto &control =
+  void Solve(float& pit_output, float& yaw_output, float target_pit_angle,
+             const LibXR::CycleValue<float>& target_yaw_angle, float dt) {
+    auto& control =
         ai_gimbal_reference_active_ ? auto_aim_control_ : manual_control_;
     const float measured_pitch_rate = gyro_data_.y();
     const float pitch_rate_feedforward =
@@ -665,7 +749,7 @@ class Gimbal {
     control.pitch_reference_primed = true;
   }
 
-  void ControlIdentify(const auto &motor_control) {
+  void ControlIdentify(const auto& motor_control) {
     if (system_identify_.GetActiveAxis() == SystemIdentify::ActiveAxis::PITCH) {
       const float margin = system_identify_.GetConfig().pit_angle_margin_rad;
       if (pitch_relative_angle_ < PARAM.pitch_min_rad + margin ||

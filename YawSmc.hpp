@@ -36,14 +36,16 @@ class YawSmc final {
     float omega_rad_s{};
   };
 
-  YawSmc(const Param& config, float torque_limit_nm)
-      : config_(config), torque_limit_nm_(torque_limit_nm) {}
+  YawSmc(const Param& config, float torque_limit_nm, bool cyclic = true)
+      : config_(config), torque_limit_nm_(torque_limit_nm), cyclic_(cyclic) {}
 
   [[nodiscard]] float Calculate(const Reference& reference,
                                 const Feedback& feedback,
                                 float j_kg_m2) const {
-    const float error_rad =
-        LibXR::CycleValue<float>(feedback.theta_rad) - reference.theta_rad;
+    const float error_rad = cyclic_
+                                ? LibXR::CycleValue<float>(feedback.theta_rad) -
+                                      reference.theta_rad
+                                : feedback.theta_rad - reference.theta_rad;
     const float abs_error_rad = std::fabs(error_rad);
     if (abs_error_rad < config_.error_deadband_rad) {
       return 0.0f;
@@ -86,4 +88,5 @@ class YawSmc final {
 
   const Param config_;
   const float torque_limit_nm_;
+  const bool cyclic_;
 };
