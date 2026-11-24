@@ -5,6 +5,7 @@
 module_description: Dual-Yaw gimbal controller with IMU feedback
 depends:
 - id: GUET-PLDX/CMD
+  ref: e496fc2fadb49d90bd2924432c46d140efdba3a0
 - id: GUET-PLDX/Motor
 - id: xrobot-org/BMI088
 === END MANIFEST === */
@@ -110,6 +111,7 @@ class Gimbal {
     const char* gyro_topic_name;
     const char* gimbal_cmd_topic_name;
     PatrolParam patrol;
+    bool manual_configuration_interlock = false;
   };
 
   Gimbal(CMD& cmd, Motor& motor_pit, Motor& motor_yaw, Motor& motor_syaw,
@@ -149,7 +151,8 @@ class Gimbal {
                    .euler_topic_name = "gimbal_euler",
                    .gyro_topic_name = "gimbal_gyro",
                    .gimbal_cmd_topic_name = "gimbal_cmd",
-                   .patrol = {}})
+                   .patrol = {},
+                   .manual_configuration_interlock = false})
       : cmd_(cmd),
         PARAM(param),
         manual_control_(PARAM.manual, PARAM),
@@ -196,6 +199,14 @@ class Gimbal {
     LibXR::Topic::ASyncSubscriber<Pldx::LifterPosition> fold_target_suber(
         LibXR::Topic(LibXR::Topic::FindOrCreate<Pldx::LifterPosition>(
             Pldx::LIFTER_TARGET_TOPIC)));
+    std::optional<LibXR::Topic::ASyncSubscriber<Pldx::ConfigurationFoldCommand>>
+        configuration_fold_suber;
+    if (gimbal->PARAM.manual_configuration_interlock) {
+      configuration_fold_suber.emplace(LibXR::Topic(
+          LibXR::Topic::FindOrCreate<Pldx::ConfigurationFoldCommand>(
+              Pldx::CONFIGURATION_FOLD_COMMAND_TOPIC)));
+      configuration_fold_suber->StartWaiting();
+    }
     std::optional<LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>>>
         big_yaw_euler_suber;
     std::optional<LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>>>
@@ -241,6 +252,10 @@ class Gimbal {
         gimbal->fold_target_ = fold_target_suber.GetData();
         fold_target_suber.StartWaiting();
       }
+      if (configuration_fold_suber && configuration_fold_suber->Available()) {
+        gimbal->configuration_fold_ = configuration_fold_suber->GetData();
+        configuration_fold_suber->StartWaiting();
+      }
       if (big_yaw_euler_suber && big_yaw_euler_suber->Available()) {
         gimbal->big_yaw_euler_ = big_yaw_euler_suber->GetData();
         gimbal->big_yaw_euler_received_ = true;
@@ -271,7 +286,7 @@ class Gimbal {
         SetMode(GimbalEvent::SET_MODE_IDENTIFY);
       }
     }
-    motor_yaw_->Update();
+    const bool yaw_online = motor_yaw_->Update() == LibXR::ErrorCode::OK;
     motor_pit_->Update();
     motor_syaw_->Update();
     fold_motor_online_ = motor_fold_->Update() == LibXR::ErrorCode::OK;
@@ -310,6 +325,21 @@ class Gimbal {
           lifter_feedback.position != Pldx::LifterPosition::MIDDLE;
     }
     fold_feedback_topic_.Publish(lifter_feedback);
+    if (PARAM.manual_configuration_interlock) {
+      Pldx::ConfigurationFeedback feedback{
+          .position = lifter_feedback.position,
+          .yaw_rad = big_yaw,
+          .fold_valid = FoldControlAvailable() && fold_motor_online_ &&
+                        fold_motor_feedback_.state == 1U &&
+                        fold_motor_feedback_.error_id == 0U &&
+                        std::isfinite(fold_motor_feedback_.position) &&
+                        std::isfinite(fold_motor_feedback_.omega),
+          .yaw_valid = yaw_online && motor_yaw_feedback_.error_id == 0U &&
+                       std::isfinite(big_yaw),
+          .fold_sample_us = fold_motor_feedback_.received_time_us,
+          .yaw_sample_us = motor_yaw_feedback_.received_time_us};
+      configuration_feedback_topic_.Publish(feedback);
+    }
     topic_yaw_angle_.Publish(big_yaw);
     topic_pit_angle_.Publish(pitch_relative_angle_);
     topic_syaw_angle_.Publish(small_yaw_relative_angle_);
@@ -466,21 +496,48 @@ class Gimbal {
       }
     };
 
-    const bool fold_requested = fold_target_.has_value() &&
-                                PARAM.fold_torque_limit_nm > 0.0f;
-    if (fold_requested && current_mode_ != GimbalEvent::SET_MODE_RELAX &&
-        current_mode_ != GimbalEvent::SET_MODE_IDENTIFY) {
-      if (!fold_motor_online_) {
+    const auto selection = cmd_.GetControlSelection();
+    const bool manual_fold_control = PARAM.manual_configuration_interlock &&
+                                     selection.mode == CMD::Mode::CMD_OP_CTRL;
+    if (PARAM.manual_configuration_interlock &&
+        selection.revision != last_fold_control_revision_) {
+      last_fold_control_revision_ = selection.revision;
+      fold_reference_rad_.reset();
+      fold_hold_rad_.reset();
+    }
+    const auto fold_action =
+        SelectFoldAction(manual_fold_control, selection.revision);
+    if (fold_action != last_fold_action_) {
+      if (manual_fold_control) {
         fold_reference_rad_.reset();
+        fold_hold_rad_.reset();
+      }
+      last_fold_action_ = fold_action;
+    }
+    const bool fold_feedback_usable = fold_motor_online_ &&
+                                      std::isfinite(fold_motor_feedback_.position) &&
+                                      std::isfinite(fold_motor_feedback_.omega);
+    if (fold_action != Pldx::FoldAction::RELEASE && FoldControlAvailable() &&
+        (!manual_fold_control || fold_feedback_usable)) {
+      if (!fold_motor_online_ || !std::isfinite(fold_motor_feedback_.position)) {
+        fold_reference_rad_.reset();
+        fold_hold_rad_.reset();
       } else if (fold_motor_feedback_.state != 1U) {
         fold_reference_rad_.reset();
+        fold_hold_rad_.reset();
         motor_control(motor_fold_, fold_motor_feedback_, {});
         fold_engaged_ = true;
       } else if (fold_motor_feedback_.received_time_us != 0U) {
-        const float target = *fold_target_ == Pldx::LifterPosition::TOP
-                                 ? PARAM.fold_top_rad
-                                 : PARAM.fold_bottom_rad;
         const float angle = fold_motor_feedback_.position;
+        if (fold_action == Pldx::FoldAction::HOLD && !fold_hold_rad_) {
+          fold_hold_rad_ = angle;
+        }
+        float target = PARAM.fold_bottom_rad;
+        if (fold_hold_rad_) {
+          target = *fold_hold_rad_;
+        } else if (fold_action == Pldx::FoldAction::TOP) {
+          target = PARAM.fold_top_rad;
+        }
         const float reference = fold_reference_rad_.value_or(angle);
         const float max_step = PARAM.fold_ramp_rad_s * dt_;
         const float step = std::clamp(target - reference, -max_step, max_step);
@@ -498,6 +555,7 @@ class Gimbal {
     } else if (fold_engaged_) {
       motor_fold_->Relax();
       fold_reference_rad_.reset();
+      fold_hold_rad_.reset();
       fold_engaged_ = false;
     }
 
@@ -581,6 +639,31 @@ class Gimbal {
   LibXR::Event& GetEvent() { return gimbal_event_; }
 
  private:
+  bool FoldControlAvailable() const {
+    return PARAM.fold_torque_limit_nm > 0.0F &&
+           PARAM.fold_top_rad > PARAM.fold_bottom_rad &&
+           current_mode_ != GimbalEvent::SET_MODE_RELAX &&
+           current_mode_ != GimbalEvent::SET_MODE_IDENTIFY;
+  }
+
+  Pldx::FoldAction SelectFoldAction(bool manual_fold_control,
+                                   uint32_t control_revision) const {
+    if (manual_fold_control) {
+      const auto now_ms =
+          static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
+      if (!configuration_fold_ ||
+          configuration_fold_->control_revision != control_revision ||
+          now_ms - configuration_fold_->stamp_ms >
+              Pldx::CONFIGURATION_COMMAND_TIMEOUT_MS) {
+        return Pldx::FoldAction::HOLD;
+      }
+      return configuration_fold_->action;
+    }
+    if (!fold_target_) return Pldx::FoldAction::RELEASE;
+    return *fold_target_ == Pldx::LifterPosition::TOP ? Pldx::FoldAction::TOP
+                                                    : Pldx::FoldAction::BOTTOM;
+  }
+
   struct ControlState {
     LibXR::PID<float> pid_pit_angle;
     LibXR::PID<float> pid_pit_omega;
@@ -645,19 +728,27 @@ class Gimbal {
   bool identify_boot_checked_ = false;
   bool identify_relax_lock_ = false;
 
+  std::optional<Pldx::LifterPosition> fold_target_;
+  std::optional<Pldx::ConfigurationFoldCommand> configuration_fold_;
+  uint32_t last_fold_control_revision_ = 0U;
+  Motor::Feedback fold_motor_feedback_{};
+  bool fold_motor_online_ = false;
+  std::optional<float> fold_reference_rad_;
+  std::optional<float> fold_hold_rad_;
+  Pldx::FoldAction last_fold_action_ = Pldx::FoldAction::RELEASE;
+  bool fold_engaged_ = false;
+
   CMD& cmd_;
   const Param PARAM;
   ControlState manual_control_;
   ControlState auto_aim_control_;
   YawSmc fold_smc_;
-  Motor::Feedback fold_motor_feedback_{};
-  bool fold_motor_online_ = false;
-  std::optional<Pldx::LifterPosition> fold_target_;
-  std::optional<float> fold_reference_rad_;
-  bool fold_engaged_ = false;
   LibXR::Topic fold_feedback_topic_{
       LibXR::Topic::FindOrCreate<Pldx::LifterFeedback>(
           Pldx::LIFTER_FEEDBACK_TOPIC)};
+  LibXR::Topic configuration_feedback_topic_{
+      LibXR::Topic::FindOrCreate<Pldx::ConfigurationFeedback>(
+          Pldx::CONFIGURATION_FEEDBACK_TOPIC)};
 
   Motor* motor_yaw_;
   Motor* motor_pit_;
