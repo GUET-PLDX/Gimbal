@@ -669,7 +669,7 @@ class Gimbal {
     LibXR::PID<float> pid_pit_omega;
     YawSmc yaw_smc;
     YawSmc syaw_smc;
-    float last_pitch_speed = 0.0f;
+    float last_pitch_position_speed = 0.0f;
     bool pitch_reference_primed = false;
 
     ControlState(const ControlParam& param, const Param& limits)
@@ -683,7 +683,7 @@ class Gimbal {
       pid_pit_angle.Reset();
       pid_pit_omega.Reset();
       pid_pit_omega.SetFeedForward(0.0f);
-      last_pitch_speed = 0.0f;
+      last_pitch_position_speed = 0.0f;
       pitch_reference_primed = false;
     }
   };
@@ -802,18 +802,20 @@ class Gimbal {
     auto& control =
         ai_gimbal_reference_active_ ? auto_aim_control_ : manual_control_;
     const float measured_pitch_rate = gyro_data_.y();
+    const bool pitch_visual_feedforward_active =
+        ai_gimbal_reference_active_ && target_pit_angle == target_world_pitch_;
     const float pitch_rate_feedforward =
-        ai_gimbal_reference_active_ && target_pit_angle == target_world_pitch_
-            ? cmd_data_.pit_dot
-            : 0.0f;
-    const float pitch_speed_ref =
-        control.pid_pit_angle.Calculate(target_pit_angle, euler_.Pitch(),
-                                        measured_pitch_rate, dt) +
-        pitch_rate_feedforward;
-    const float pitch_accel_ref =
+        pitch_visual_feedforward_active ? cmd_data_.pit_dot : 0.0f;
+    const float pitch_position_speed = control.pid_pit_angle.Calculate(
+        target_pit_angle, euler_.Pitch(), measured_pitch_rate, dt);
+    const float pitch_speed_ref = pitch_position_speed + pitch_rate_feedforward;
+    const float pitch_position_accel =
         control.pitch_reference_primed
-            ? (pitch_speed_ref - control.last_pitch_speed) / dt
+            ? (pitch_position_speed - control.last_pitch_position_speed) / dt
             : 0.0f;
+    const float pitch_accel_ref =
+        pitch_position_accel +
+        (pitch_visual_feedforward_active ? cmd_data_.pit_ddot : 0.0f);
     control.pid_pit_omega.SetFeedForward(
         PARAM.j_pit * pitch_accel_ref -
         PARAM.pit_lc * std::sin(euler_.Pitch() + PARAM.pit_theta));
@@ -835,7 +837,7 @@ class Gimbal {
                             : gyro_data_.z()},
         PARAM.j_syaw);
 
-    control.last_pitch_speed = pitch_speed_ref;
+    control.last_pitch_position_speed = pitch_position_speed;
     control.pitch_reference_primed = true;
   }
 
