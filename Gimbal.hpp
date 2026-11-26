@@ -5,7 +5,7 @@
 module_description: Dual-Yaw gimbal controller with IMU feedback
 depends:
 - id: GUET-PLDX/CMD
-  ref: d9254a5957d641c0dbceda88eea14c001648c554
+  ref: 923ca3823980650c5ee28a2181c53448d7489183
 - id: GUET-PLDX/Motor
 - id: xrobot-org/BMI088
 === END MANIFEST === */
@@ -24,6 +24,8 @@ depends:
 #include "libxr_def.hpp"
 #include "libxr_time.hpp"
 #include "pid.hpp"
+#include "mutex.hpp"
+#include "latest_snapshot.hpp"
 #include "thread.hpp"
 #include "timebase.hpp"
 #include "transform.hpp"
@@ -169,6 +171,7 @@ class Gimbal {
            PARAM.auto_aim_recenter_trigger_max_rad <= PARAM.small_yaw_max_rad);
     auto lost_ctrl_callback = LibXR::Callback<uint32_t>::Create(
         [](bool, Gimbal* gimbal, uint32_t) {
+          LibXR::Mutex::LockGuard guard(gimbal->control_mutex_);
           gimbal->SetMode(GimbalEvent::SET_MODE_RELAX);
         },
         this);
@@ -176,9 +179,16 @@ class Gimbal {
         [](bool in_isr, Gimbal* gimbal, uint32_t event_id) {
           ASSERT(!in_isr);
           if (in_isr) return;
+          LibXR::Mutex::LockGuard guard(gimbal->control_mutex_);
           gimbal->SetMode(static_cast<GimbalEvent>(event_id));
         },
         this);
+    auto cmd_callback = LibXR::Topic::Callback::Create(
+        [](bool, Gimbal* gimbal, const CMD::GimbalCMD& data) {
+          gimbal->latest_cmd_.Store(data);
+        }, this);
+    LibXR::Topic(LibXR::Topic::Find(PARAM.gimbal_cmd_topic_name))
+        .RegisterCallback(cmd_callback);
     cmd_.GetEvent().Register(CMD::CMD_EVENT_LOST_CTRL, lost_ctrl_callback);
     for (uint32_t event = 0;
          event <= static_cast<uint32_t>(GimbalEvent::SET_MODE_IDENTIFY);
@@ -190,8 +200,6 @@ class Gimbal {
   }
 
   static void ThreadFunc(Gimbal* gimbal) {
-    LibXR::Topic::ASyncSubscriber<CMD::GimbalCMD> cmd_suber(
-        gimbal->PARAM.gimbal_cmd_topic_name);
     LibXR::Topic::ASyncSubscriber<LibXR::EulerAngle<float>> euler_suber(
         gimbal->PARAM.euler_topic_name);
     LibXR::Topic::ASyncSubscriber<Eigen::Matrix<float, 3, 1>> gyro_suber(
@@ -220,7 +228,6 @@ class Gimbal {
       big_yaw_gyro_suber->StartWaiting();
     }
 
-    cmd_suber.StartWaiting();
     euler_suber.StartWaiting();
     gyro_suber.StartWaiting();
     fold_target_suber.StartWaiting();
@@ -228,56 +235,55 @@ class Gimbal {
     gimbal->last_online_time_ = LibXR::Timebase::GetMicroseconds();
 
     auto last_time = LibXR::Timebase::GetMilliseconds();
-    auto last_mode = static_cast<uint8_t>(gimbal->current_mode_);
-    gimbal->topic_mode_.Publish(last_mode);
+    uint8_t last_mode;
+    {
+      LibXR::Mutex::LockGuard guard(gimbal->control_mutex_);
+      last_mode = static_cast<uint8_t>(gimbal->current_mode_);
+      gimbal->topic_mode_.Publish(last_mode);
+    }
 
     while (true) {
-      if (cmd_suber.Available()) {
-        gimbal->cmd_data_ = cmd_suber.GetData();
-        cmd_suber.StartWaiting();
-      }
-      gimbal->cmd_.UpdateRemoteInput();
-      if (cmd_suber.Available()) {
-        gimbal->cmd_data_ = cmd_suber.GetData();
-        cmd_suber.StartWaiting();
-      }
-      if (euler_suber.Available()) {
-        gimbal->euler_ = euler_suber.GetData();
-        gimbal->euler_.Pitch() *= -1.0f;
-        gimbal->euler_received_ = true;
-        euler_suber.StartWaiting();
-      }
-      if (gyro_suber.Available()) {
-        gimbal->gyro_data_ = gyro_suber.GetData();
-        gimbal->gyro_data_.y() *= -1.0f;
-        gimbal->gyro_received_ = true;
-        gyro_suber.StartWaiting();
-      }
-      if (fold_target_suber.Available()) {
-        gimbal->fold_target_ = fold_target_suber.GetData();
-        fold_target_suber.StartWaiting();
-      }
-      if (configuration_fold_suber && configuration_fold_suber->Available()) {
-        gimbal->configuration_fold_ = configuration_fold_suber->GetData();
-        configuration_fold_suber->StartWaiting();
-      }
-      if (big_yaw_euler_suber && big_yaw_euler_suber->Available()) {
-        gimbal->big_yaw_euler_ = big_yaw_euler_suber->GetData();
-        gimbal->big_yaw_euler_received_ = true;
-        big_yaw_euler_suber->StartWaiting();
-      }
-      if (big_yaw_gyro_suber && big_yaw_gyro_suber->Available()) {
-        gimbal->big_yaw_gyro_ = big_yaw_gyro_suber->GetData();
-        gimbal->big_yaw_gyro_received_ = true;
-        big_yaw_gyro_suber->StartWaiting();
-      }
-      gimbal->Update();
-      gimbal->ParseCMD();
-      gimbal->Control();
-      uint8_t mode = static_cast<uint8_t>(gimbal->current_mode_);
-      if (mode != last_mode) {
-        gimbal->topic_mode_.Publish(mode);
-        last_mode = mode;
+      {
+        LibXR::Mutex::LockGuard guard(gimbal->control_mutex_);
+        gimbal->latest_cmd_.LoadLatest(gimbal->cmd_data_);
+        if (euler_suber.Available()) {
+          gimbal->euler_ = euler_suber.GetData();
+          gimbal->euler_.Pitch() *= -1.0f;
+          gimbal->euler_received_ = true;
+          euler_suber.StartWaiting();
+        }
+        if (gyro_suber.Available()) {
+          gimbal->gyro_data_ = gyro_suber.GetData();
+          gimbal->gyro_data_.y() *= -1.0f;
+          gimbal->gyro_received_ = true;
+          gyro_suber.StartWaiting();
+        }
+        if (fold_target_suber.Available()) {
+          gimbal->fold_target_ = fold_target_suber.GetData();
+          fold_target_suber.StartWaiting();
+        }
+        if (configuration_fold_suber && configuration_fold_suber->Available()) {
+          gimbal->configuration_fold_ = configuration_fold_suber->GetData();
+          configuration_fold_suber->StartWaiting();
+        }
+        if (big_yaw_euler_suber && big_yaw_euler_suber->Available()) {
+          gimbal->big_yaw_euler_ = big_yaw_euler_suber->GetData();
+          gimbal->big_yaw_euler_received_ = true;
+          big_yaw_euler_suber->StartWaiting();
+        }
+        if (big_yaw_gyro_suber && big_yaw_gyro_suber->Available()) {
+          gimbal->big_yaw_gyro_ = big_yaw_gyro_suber->GetData();
+          gimbal->big_yaw_gyro_received_ = true;
+          big_yaw_gyro_suber->StartWaiting();
+        }
+        gimbal->Update();
+        gimbal->ParseCMD();
+        gimbal->Control();
+        uint8_t mode = static_cast<uint8_t>(gimbal->current_mode_);
+        if (mode != last_mode) {
+          gimbal->topic_mode_.Publish(mode);
+          last_mode = mode;
+        }
       }
       LibXR::Thread::SleepUntil(last_time, 1);
     }
@@ -355,7 +361,16 @@ class Gimbal {
   }
 
   void ParseCMD() {
-    const auto ctrl_mode = cmd_.GetGimbalCtrlMode();
+    const auto ctrl_mode = cmd_data_.control_mode;
+    /* COMMON 使用摇杆积分；旧视觉角尚未被新手动帧替换时先撤销输出。
+       AUTO 模式下的手动快照仍可沿用既有的操作员接管／视觉掉线回退。 */
+    waiting_remote_frame_ = current_mode_ == GimbalEvent::SET_MODE_COMMON &&
+                            ctrl_mode == CMD::Mode::CMD_AUTO_CTRL &&
+                            cmd_data_.ai_online;
+    if (waiting_remote_frame_) {
+      target_initialized_ = false;
+      return;
+    }
     const bool operator_control = ctrl_mode == CMD::Mode::CMD_OP_CTRL;
     if (operator_control && current_mode_ == GimbalEvent::SET_MODE_AUTOPATROL) {
       SetMode(GimbalEvent::SET_MODE_COMMON);
@@ -392,7 +407,7 @@ class Gimbal {
       return;
     }
     const bool ai_active =
-        ctrl_mode == CMD::Mode::CMD_AUTO_CTRL && cmd_.GetAIGimbalStatus() &&
+        ctrl_mode == CMD::Mode::CMD_AUTO_CTRL && cmd_data_.ai_online &&
         (current_mode_ == GimbalEvent::SET_VISION_AUTO_AIM ||
          current_mode_ == GimbalEvent::SET_VISION_SMALL_BUFF ||
          current_mode_ == GimbalEvent::SET_VISION_BIG_BUFF);
@@ -460,11 +475,26 @@ class Gimbal {
   }
 
   void Control() {
+    if (waiting_remote_frame_) {
+      motor_yaw_->Relax();
+      motor_pit_->Relax();
+      motor_syaw_->Relax();
+      motor_fold_->Relax();
+      big_yaw_relaxed_ = true;
+      fold_engaged_ = false;
+      fold_reference_rad_.reset();
+      fold_hold_rad_.reset();
+      manual_control_.Reset();
+      auto_aim_control_.Reset();
+      auto_aim_yaw_ = {};
+      topic_auto_aim_yaw_.Publish(auto_aim_yaw_);
+      return;
+    }
     const float big_yaw_angle = motor_yaw_feedback_.abs_angle;
     const bool ordinary_auto_aim =
         current_mode_ == GimbalEvent::SET_VISION_AUTO_AIM &&
-        cmd_.GetGimbalCtrlMode() == CMD::Mode::CMD_AUTO_CTRL &&
-        cmd_.GetAIGimbalStatus();
+        cmd_data_.control_mode == CMD::Mode::CMD_AUTO_CTRL &&
+        cmd_data_.ai_online;
     if (!ordinary_auto_aim) {
       auto_aim_yaw_ = {};
     } else {
@@ -739,6 +769,7 @@ class Gimbal {
 
   bool identify_boot_checked_ = false;
   bool identify_relax_lock_ = false;
+  bool waiting_remote_frame_ = false; /* SC 事件与命令尚未一致时撤销输出 */
 
   std::optional<Pldx::LifterPosition> fold_target_;
   std::optional<Pldx::ConfigurationFoldCommand> configuration_fold_;
@@ -791,6 +822,8 @@ class Gimbal {
   LibXR::Topic topic_auto_aim_yaw_ =
       LibXR::Topic::CreateTopic<AutoAimYawStatus>("gimbal_auto_aim_yaw",
                                                   nullptr, true);
+  LibXR::Mutex control_mutex_; /* 模式进入动作与控制计算互斥 */
+  LibXR::LatestSnapshot<CMD::GimbalCMD> latest_cmd_{CMD::GimbalCMD{}};
   LibXR::Thread thread_;
 
   void PitchLimit(float& target_pit, float now_eulr_angle,
