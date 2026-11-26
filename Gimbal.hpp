@@ -5,7 +5,7 @@
 module_description: Dual-Yaw gimbal controller with IMU feedback
 depends:
 - id: GUET-PLDX/CMD
-  ref: e496fc2fadb49d90bd2924432c46d140efdba3a0
+  ref: 84bb49892e595d373ba6d450142925a16bc50677
 - id: GUET-PLDX/Motor
 - id: xrobot-org/BMI088
 === END MANIFEST === */
@@ -232,6 +232,7 @@ class Gimbal {
     gimbal->topic_mode_.Publish(last_mode);
 
     while (true) {
+      gimbal->cmd_.UpdateRemoteInput();
       if (cmd_suber.Available()) {
         gimbal->cmd_data_ = cmd_suber.GetData();
         cmd_suber.StartWaiting();
@@ -315,10 +316,11 @@ class Gimbal {
         lifter_feedback.position = Pldx::LifterPosition::BOTTOM;
         lifter_feedback.transform_percent = 100.0f;
       } else {
-        lifter_feedback.transform_percent = 100.0f * std::clamp(
-            1.0f - std::fabs(angle - PARAM.fold_bottom_rad) /
-                       (PARAM.fold_top_rad - PARAM.fold_bottom_rad),
-            0.0f, 1.0f);
+        lifter_feedback.transform_percent =
+            100.0f *
+            std::clamp(1.0f - std::fabs(angle - PARAM.fold_bottom_rad) /
+                                  (PARAM.fold_top_rad - PARAM.fold_bottom_rad),
+                       0.0f, 1.0f);
       }
       lifter_feedback.is_transformable =
           fold_motor_feedback_.error_id == 0U &&
@@ -349,7 +351,7 @@ class Gimbal {
   }
 
   void ParseCMD() {
-    const auto ctrl_mode = cmd_.GetCtrlMode();
+    const auto ctrl_mode = cmd_.GetGimbalCtrlMode();
     const bool operator_control = ctrl_mode == CMD::Mode::CMD_OP_CTRL;
     if (operator_control && current_mode_ == GimbalEvent::SET_MODE_AUTOPATROL) {
       SetMode(GimbalEvent::SET_MODE_COMMON);
@@ -457,7 +459,7 @@ class Gimbal {
     const float big_yaw_angle = motor_yaw_feedback_.abs_angle;
     const bool ordinary_auto_aim =
         current_mode_ == GimbalEvent::SET_VISION_AUTO_AIM &&
-        cmd_.GetCtrlMode() == CMD::Mode::CMD_AUTO_CTRL &&
+        cmd_.GetGimbalCtrlMode() == CMD::Mode::CMD_AUTO_CTRL &&
         cmd_.GetAIGimbalStatus();
     if (!ordinary_auto_aim) {
       auto_aim_yaw_ = {};
@@ -468,8 +470,10 @@ class Gimbal {
         auto_aim_yaw_.hold_encoder_angle_rad = big_yaw_angle;
       }
       if (auto_aim_yaw_.state == AutoAimYawState::HOLD &&
-          (small_yaw_relative_angle_ < PARAM.auto_aim_recenter_trigger_min_rad ||
-           small_yaw_relative_angle_ > PARAM.auto_aim_recenter_trigger_max_rad)) {
+          (small_yaw_relative_angle_ <
+               PARAM.auto_aim_recenter_trigger_min_rad ||
+           small_yaw_relative_angle_ >
+               PARAM.auto_aim_recenter_trigger_max_rad)) {
         auto_aim_yaw_.state = AutoAimYawState::RECENTER;
       } else if (auto_aim_yaw_.state == AutoAimYawState::RECENTER &&
                  std::fabs(small_yaw_relative_angle_) <=
@@ -506,20 +510,23 @@ class Gimbal {
       fold_hold_rad_.reset();
     }
     const auto fold_action =
-        SelectFoldAction(manual_fold_control, selection.revision);
+        PARAM.manual_configuration_interlock && cmd_.ChassisRelaxRequested()
+            ? Pldx::FoldAction::HOLD
+            : SelectFoldAction(manual_fold_control, selection.revision);
     if (fold_action != last_fold_action_) {
-      if (manual_fold_control) {
+      if (PARAM.manual_configuration_interlock) {
         fold_reference_rad_.reset();
         fold_hold_rad_.reset();
       }
       last_fold_action_ = fold_action;
     }
-    const bool fold_feedback_usable = fold_motor_online_ &&
-                                      std::isfinite(fold_motor_feedback_.position) &&
-                                      std::isfinite(fold_motor_feedback_.omega);
+    const bool fold_feedback_usable =
+        fold_motor_online_ && std::isfinite(fold_motor_feedback_.position) &&
+        std::isfinite(fold_motor_feedback_.omega);
     if (fold_action != Pldx::FoldAction::RELEASE && FoldControlAvailable() &&
         (!manual_fold_control || fold_feedback_usable)) {
-      if (!fold_motor_online_ || !std::isfinite(fold_motor_feedback_.position)) {
+      if (!fold_motor_online_ ||
+          !std::isfinite(fold_motor_feedback_.position)) {
         fold_reference_rad_.reset();
         fold_hold_rad_.reset();
       } else if (fold_motor_feedback_.state != 1U) {
@@ -547,9 +554,9 @@ class Gimbal {
              .omega_rad_s = dt_ > 0.0f ? step / dt_ : 0.0f},
             {.theta_rad = angle, .omega_rad_s = fold_motor_feedback_.omega},
             PARAM.j_fold);
-        motor_control(motor_fold_, fold_motor_feedback_,
-                      {.mode = Motor::ControlMode::MODE_TORQUE,
-                       .torque = torque});
+        motor_control(
+            motor_fold_, fold_motor_feedback_,
+            {.mode = Motor::ControlMode::MODE_TORQUE, .torque = torque});
         fold_engaged_ = true;
       }
     } else if (fold_engaged_) {
@@ -614,9 +621,9 @@ class Gimbal {
         motor_control(motor_yaw_, motor_yaw_feedback_,
                       {.mode = Motor::ControlMode::MODE_TORQUE,
                        .torque = big_yaw_output});
-        motor_control(motor_syaw_, motor_syaw_feedback_,
-                      {.mode = Motor::ControlMode::MODE_TORQUE,
-                       .torque = yaw_output});
+        motor_control(
+            motor_syaw_, motor_syaw_feedback_,
+            {.mode = Motor::ControlMode::MODE_TORQUE, .torque = yaw_output});
         motor_control(
             motor_pit_, motor_pit_feedback_,
             {.mode = Motor::ControlMode::MODE_TORQUE,
@@ -647,7 +654,7 @@ class Gimbal {
   }
 
   Pldx::FoldAction SelectFoldAction(bool manual_fold_control,
-                                   uint32_t control_revision) const {
+                                    uint32_t control_revision) const {
     if (manual_fold_control) {
       const auto now_ms =
           static_cast<uint32_t>(LibXR::Timebase::GetMilliseconds());
@@ -660,8 +667,9 @@ class Gimbal {
       return configuration_fold_->action;
     }
     if (!fold_target_) return Pldx::FoldAction::RELEASE;
-    return *fold_target_ == Pldx::LifterPosition::TOP ? Pldx::FoldAction::TOP
-                                                    : Pldx::FoldAction::BOTTOM;
+    return *fold_target_ == Pldx::LifterPosition::TOP
+               ? Pldx::FoldAction::TOP
+               : Pldx::FoldAction::BOTTOM;
   }
 
   struct ControlState {
@@ -677,7 +685,7 @@ class Gimbal {
           pid_pit_omega(param.pid_pit_omega),
           yaw_smc(param.yaw_smc, limits.yaw_torque_limit_nm),
           syaw_smc(param.syaw_smc, limits.syaw_torque_limit_nm.value_or(
-                                      limits.yaw_torque_limit_nm)) {}
+                                       limits.yaw_torque_limit_nm)) {}
 
     void Reset() {
       pid_pit_angle.Reset();
@@ -891,7 +899,7 @@ class Gimbal {
 
   void SetMode(GimbalEvent event) {
     if (event == GimbalEvent::SET_MODE_AUTOPATROL &&
-        (cmd_.GetCtrlMode() != CMD::Mode::CMD_AUTO_CTRL ||
+        (cmd_.GetGimbalCtrlMode() != CMD::Mode::CMD_AUTO_CTRL ||
          !PARAM.patrol.big_yaw_euler_topic_name ||
          !PARAM.patrol.big_yaw_gyro_topic_name ||
          !std::isfinite(PARAM.patrol.big_yaw_period_s) ||
