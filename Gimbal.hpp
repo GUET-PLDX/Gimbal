@@ -5,7 +5,7 @@
 module_description: Dual-Yaw gimbal controller with IMU feedback
 depends:
 - id: GUET-PLDX/CMD
-  ref: 923ca3823980650c5ee28a2181c53448d7489183
+  ref: b0c8eed1a1b601361b5e1c7e63d5a79064cd4760
 - id: GUET-PLDX/Motor
 - id: xrobot-org/BMI088
 === END MANIFEST === */
