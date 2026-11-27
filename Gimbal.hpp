@@ -18,6 +18,7 @@ depends:
 #include "CMD.hpp"
 #include "Motor.hpp"
 #include "SystemIdentify.hpp"
+#include "YawJointFeedback.hpp"
 #include "YawSmc.hpp"
 #include "event.hpp"
 #include "libxr.hpp"
@@ -358,6 +359,13 @@ class Gimbal {
     topic_yaw_omega_.Publish(motor_yaw_feedback_.omega);
     topic_pit_omega_.Publish(motor_pit_feedback_.omega);
     topic_syaw_omega_.Publish(motor_syaw_feedback_.omega);
+    Pldx::YawJointFeedback yaw_joint{};
+    uint64_t yaw_joint_us = 0U;
+    if (Pldx::MakeYawJointFeedback(motor_yaw_feedback_, yaw_online,
+                                   PARAM.yaw_zero, yaw_joint_sequence_,
+                                   yaw_joint, yaw_joint_us)) {
+      topic_yaw_joint_.Publish(yaw_joint, LibXR::MicrosecondTimestamp(yaw_joint_us));
+    }
   }
 
   void ParseCMD() {
@@ -776,6 +784,7 @@ class Gimbal {
   uint32_t last_fold_control_revision_ = 0U;
   Motor::Feedback fold_motor_feedback_{};
   bool fold_motor_online_ = false;
+  uint16_t yaw_joint_sequence_ = 0U;
   std::optional<float> fold_reference_rad_;
   std::optional<float> fold_hold_rad_;
   Pldx::FoldAction last_fold_action_ = Pldx::FoldAction::RELEASE;
@@ -816,6 +825,9 @@ class Gimbal {
       LibXR::Topic::CreateTopic<float>("pitchmotor_omega");
   LibXR::Topic topic_syaw_omega_ =
       LibXR::Topic::CreateTopic<float>("syawmotor_omega");
+  LibXR::Topic topic_yaw_joint_ =
+      LibXR::Topic::CreateTopic<Pldx::YawJointFeedback>(
+          Pldx::YAW_JOINT_FEEDBACK_TOPIC);
   LibXR::Topic topic_mode_ = LibXR::Topic::CreateTopic<uint8_t>("gimbal_mode");
   LibXR::Topic topic_vision_task_ =
       LibXR::Topic::CreateTopic<uint8_t>("vision_task");

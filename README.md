@@ -45,3 +45,14 @@ fold_smc: {c: 20.0, k: 120.0, epsilon: 0.5, q: 21.0, p: 27.0, error_deadband_rad
 bash tests/yaw_smc_host_regression.sh
 bash tests/system_identify_host_regression.sh
 ```
+
+## 大 Yaw 关节反馈（`nav_yaw_joint`）
+
+`YawJointFeedback.hpp` 定义 8 字节小端负载 `{float angle_rad, float velocity_rad_s}`，经导航 USB 链路由 `navigation_tx` 发送。
+
+- 两个字段来自同一帧电机 CAN 反馈：`angle_rad = abs_angle - yaw_zero`，`velocity_rad_s = omega`。电机 `reverse` 已在解码时同时作用于二者；DM 电机 `omega` 为 rad/s，未做额外传动比换算。正方向与现有 `yawmotor_angle` 相同。
+- 采样时间不放在负载内，而是写入 LibXR 包头的 48 位微秒时间戳，取值为该帧 CAN 接收时刻（MCU `Timebase` 微秒，截断到 48 位）。不是发布或打包时刻。
+- 仅在电机在线、无错误、数值有限且序号更新时发布，同一帧不会重复发送。
+- 实机零位 `yaw_zero` 仍是占位值，零位、方向与安装标定由工单 Wanqiq7/Pldx_ws#11 验证。
+
+测试：`bash Modules/GUET-PLDX/Gimbal/tests/run_yaw_joint_feedback_test.sh`。
