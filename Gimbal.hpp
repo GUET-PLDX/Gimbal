@@ -13,12 +13,13 @@ depends:
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <optional>
+#include <type_traits>
 
 #include "CMD.hpp"
 #include "Motor.hpp"
 #include "SystemIdentify.hpp"
-#include "YawJointFeedback.hpp"
 #include "YawSmc.hpp"
 #include "event.hpp"
 #include "libxr.hpp"
@@ -52,6 +53,18 @@ static_assert(static_cast<uint8_t>(GimbalEvent::SET_MODE_IDENTIFY) == 7U);
 
 class Gimbal {
  public:
+  // Navigation USB payload: both fields come from the same motor CAN frame.
+  // Angle is relative to the chassis after subtracting yaw_zero; the motor's
+  // reverse setting already applies to both fields (positive counter-clockwise
+  // viewed from above). The CAN reception time travels in the packet header.
+  struct [[gnu::packed]] YawJointFeedback {
+    float angle_rad{};
+    float velocity_rad_s{};
+  };
+  static_assert(sizeof(YawJointFeedback) == 8U);
+  static_assert(std::is_trivially_copyable_v<YawJointFeedback>);
+  static constexpr char YAW_JOINT_FEEDBACK_TOPIC[] = "nav_yaw_joint";
+
   enum class AutoAimYawState : uint8_t { INACTIVE, HOLD, RECENTER };
 
   struct AutoAimYawStatus {
@@ -359,11 +372,16 @@ class Gimbal {
     topic_yaw_omega_.Publish(motor_yaw_feedback_.omega);
     topic_pit_omega_.Publish(motor_pit_feedback_.omega);
     topic_syaw_omega_.Publish(motor_syaw_feedback_.omega);
-    Pldx::YawJointFeedback yaw_joint{};
-    uint64_t yaw_joint_us = 0U;
-    if (Pldx::MakeYawJointFeedback(motor_yaw_feedback_, yaw_online,
-                                   PARAM.yaw_zero, yaw_joint_sequence_,
-                                   yaw_joint, yaw_joint_us)) {
+    if (yaw_online && motor_yaw_feedback_.error_id == 0U &&
+        motor_yaw_feedback_.received_time_us != 0U &&
+        motor_yaw_feedback_.sequence != yaw_joint_sequence_ &&
+        std::isfinite(big_yaw) && std::isfinite(motor_yaw_feedback_.omega)) {
+      yaw_joint_sequence_ = motor_yaw_feedback_.sequence;
+      YawJointFeedback yaw_joint{big_yaw, motor_yaw_feedback_.omega};
+      // LibXR packet timestamps carry the low 48 bits of MCU Timebase us.
+      constexpr uint64_t TIMESTAMP_MASK = (1ULL << 48U) - 1U;
+      const uint64_t yaw_joint_us =
+          motor_yaw_feedback_.received_time_us & TIMESTAMP_MASK;
       topic_yaw_joint_.Publish(yaw_joint, LibXR::MicrosecondTimestamp(yaw_joint_us));
     }
   }
@@ -826,8 +844,7 @@ class Gimbal {
   LibXR::Topic topic_syaw_omega_ =
       LibXR::Topic::CreateTopic<float>("syawmotor_omega");
   LibXR::Topic topic_yaw_joint_ =
-      LibXR::Topic::CreateTopic<Pldx::YawJointFeedback>(
-          Pldx::YAW_JOINT_FEEDBACK_TOPIC);
+      LibXR::Topic::CreateTopic<YawJointFeedback>(YAW_JOINT_FEEDBACK_TOPIC);
   LibXR::Topic topic_mode_ = LibXR::Topic::CreateTopic<uint8_t>("gimbal_mode");
   LibXR::Topic topic_vision_task_ =
       LibXR::Topic::CreateTopic<uint8_t>("vision_task");
